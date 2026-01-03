@@ -1,15 +1,15 @@
 #!/system/bin/sh
 
 if [ "$USER" != "root" -a "$(whoami 2>/dev/null)" != "root" ]; then
-  echo "autopif4: need root permissions"; exit 1;
+  echo "osm0sis: need root permissions"; exit 1;
 fi;
 case "$HOME" in
-  *termux*) echo "autopif4: need su root environment"; exit 1;;
+  *termux*) echo "osm0sis: need su root environment"; exit 1;;
 esac;
 
 until [ -z "$1" ]; do
   case "$1" in
-    -h|--help|help) echo "sh autopif4.sh [-a|-s] [-m]"; exit 0;;
+    -h|--help|help) echo "sh osm0sis.sh [-a|-s] [-m]"; exit 0;;
     -a|--advanced|advanced) ARGS="-a"; shift;;
     -s|--strong|strong) FORCE_STRONG=1; shift;;
     -m|--match|match) FORCE_MATCH=1; shift;;
@@ -22,7 +22,7 @@ echo "Pixel Canary pif.prop generator script \
 
 case "$0" in
   *.sh) DIR="$0";;
-  *) DIR="$(lsof -p $$ 2>/dev/null | grep -o '/.*autopif4.sh$')";;
+  *) DIR="$(lsof -p $$ 2>/dev/null | grep -o '/.*osm0sis.sh$')";;
 esac;
 DIR=$(dirname "$(readlink -f "$DIR")");
 
@@ -70,7 +70,7 @@ if ! echo "A\nB" | grep -m1 -A1 "A" | grep -q "B"; then
 fi;
 
 if [ "$DIR" = /data/adb/modules/playintegrityfix ]; then
-  DIR=$DIR/autopif4;
+  DIR=$DIR/osm0sis;
   mkdir -p $DIR;
 fi;
 cd "$DIR";
@@ -213,7 +213,7 @@ if [ -f "$MIGRATE" ]; then
   cat custom.pif.prop;
 fi;
 
-if [ "$DIR" = /data/adb/modules/playintegrityfix/autopif4 ]; then
+if [ "$DIR" = /data/adb/modules/playintegrityfix/osm0sis ]; then
   if [ -f /data/adb/modules/playintegrityfix/migrate.sh ]; then
     NEWNAME="custom.pif.prop";
   else

@@ -148,6 +148,7 @@ item "Crawling Pixel Update Bulletins for corresponding security patch level ...
 CANARY_ID="$(grep '"id"' PIXEL_CANARY_JSON | sed -e 's;.*canary-\(.*\)".*;\1;' -e 's;^\(.\{4\}\);\1-;')";
 [ -z "$CANARY_ID" ] && die "Failed to extract build info from JSON";
 wget -q -O PIXEL_SECBULL_HTML --no-check-certificate "https://source.android.com/docs/security/bulletin/pixel" 2>&1 || exit 1;
+<<<<<<< HEAD
 SECURITY_PATCH="$(grep "<td>$CANARY_ID" PIXEL_SECBULL_HTML | sed 's;.*<td>\(.*\)</td>;\1;')";
 if [ -z "$SECURITY_PATCH" ]; then
   warn "Failed to determine exact security patch level from Pixel Update Bulletins";
@@ -155,6 +156,8 @@ if [ -z "$SECURITY_PATCH" ]; then
   SECURITY_PATCH="${CANARY_ID}-05";
 fi;
 echo "$SECURITY_PATCH";
+=======
+>>>>>>> 6b09ffe (use custom security patch)
 
 item "Dumping values to minimal pif.prop ...";
 cat <<EOF | tee pif.prop;
@@ -163,7 +166,7 @@ MODEL=$MODEL
 FINGERPRINT=google/$PRODUCT/$DEVICE:CANARY/$ID/$INCREMENTAL:user/release-keys
 PRODUCT=$PRODUCT
 DEVICE=$DEVICE
-SECURITY_PATCH=$SECURITY_PATCH
+SECURITY_PATCH=2025-12-05
 DEVICE_INITIAL_SDK_INT=32
 EOF
 
@@ -186,7 +189,7 @@ if [ -f "$MIGRATE" ]; then
   else
     item "Retaining existing configuration ...";
   fi;
-  [ -d /data/adb/tricky_store ] && unset PATCH_COMMENT;
+
   item "Converting pif.prop to custom.pif.prop with migrate.sh:";
   rm -f pif.json custom.pif.json custom.pif.prop;
   sh $MIGRATE -i $ARGS pif.prop;
@@ -207,7 +210,9 @@ if [ -f "$MIGRATE" ]; then
     done;
   fi;
   [ "$PATCH_COMMENT" ] && sed -i 's;\*.security_patch;#\*.security_patch;' custom.pif.prop;
-  echo "\n# Canary Released: $CANARY_REL_DATE\n# Estimated Expiry: $CANARY_EXP_DATE" >> custom.pif.prop;
+  echo " " >> custom.pif.prop;
+  echo "# Released On: $CANARY_REL_DATE" >> custom.pif.prop;
+  echo "# Estimated Expiry: $CANARY_EXP_DATE" >> custom.pif.prop
   cat custom.pif.prop;
 fi;
 

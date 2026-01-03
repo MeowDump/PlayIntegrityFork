@@ -228,6 +228,7 @@ if [ "$DIR" = /data/adb/modules/playintegrityfix/autopif4 ]; then
   item "Installing new prop ...";
   cp -fv $NEWNAME ..;
 <<<<<<< HEAD
+<<<<<<< HEAD
   TS_DIR=/data/adb/tricky_store;
   if [ -d "$TS_DIR" ]; then
     TS_SECPAT=$TS_DIR/security_patch.txt;
@@ -258,3 +259,6 @@ EOF
     cat $TS_SECPAT;
   fi;
 =======
+=======
+fi;
+>>>>>>> e2a7501 (dropped killpi.sh execution)

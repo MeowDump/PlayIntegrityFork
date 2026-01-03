@@ -1,5 +1,8 @@
 #!/system/bin/sh
 
+# Enable verbose mode if requested
+[ "$VERBOSE_MODE" = 1 ] && set -x
+
 if [ "$USER" != "root" -a "$(whoami 2>/dev/null)" != "root" ]; then
   echo "osm0sis: need root permissions"; exit 1;
 fi;
@@ -9,13 +12,30 @@ esac;
 
 until [ -z "$1" ]; do
   case "$1" in
-    -h|--help|help) echo "sh osm0sis.sh [-a|-s] [-m]"; exit 0;;
-    -a|--advanced|advanced) ARGS="-a"; shift;;
-    -s|--strong|strong) FORCE_STRONG=1; shift;;
-    -m|--match|match) FORCE_MATCH=1; shift;;
-    *) break;;
-  esac;
-done;
+    -h|--help|help)
+      echo "sh osm0sis.sh [-a|-s] [-m] [-n] [-x] [-k] [-v] [-S]"
+      exit 0
+      ;;
+    -a|--advanced|advanced)
+      ARGS="-a"; shift;;
+    -s|--strong|strong)
+      FORCE_STRONG=1; shift;;
+    -m|--match|match)
+      FORCE_MATCH=1; shift;;
+    -n|--skip-json|skip-json)
+      SKIP_JSON=1; shift;;
+    -x|--skip-patch|skip-patch)
+      SKIP_PATCH=1; shift;;
+    -k|--skip-keybox|skip-keybox)
+      SKIP_KEYBOX=1; shift;;
+    -v|--verbose|verbose)
+      VERBOSE_MODE=1; shift;;
+    -S|--force-spoof-off|force-spoof-off)
+      FORCE_SPOOF_OFF=1; shift;;
+    *)
+      break;;
+  esac
+done
 
 echo "Pixel Canary pif.prop generator script \
   \n  by osm0sis @ xda-developers";
@@ -32,6 +52,7 @@ die_bb() { die "$@, install busybox"; }
 warn() { echo "\nWarning: $@!"; }
 
 export_json_from_prop() {
+    [ "$SKIP_JSON" = 1 ] && return 0   # Skip JSON if -n provided
     FLAG_FILE="/data/adb/Box-Brain/json"
     PROP_FILE="/data/adb/modules/playintegrityfix/custom.pif.prop"
     OUT_JSON="/sdcard/meow.json"

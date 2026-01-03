@@ -177,7 +177,6 @@ if [ -f "$MIGRATE" ]; then
   if [ -f "$OLDPIF" ]; then
     grep -q '//"\*.security_patch"' $OLDPIF && PATCH_COMMENT=1;
     grep -q '#\*.security_patch' $OLDPIF && PATCH_COMMENT=1;
-    grep -qE "verboseLogs|VERBOSE_LOGS" $OLDPIF && ARGS="-a";
   else
     FORCE_STRONG=1;
   fi;
@@ -200,8 +199,7 @@ if [ -f "$MIGRATE" ]; then
         esac;
       fi;
     }
-    verboseLogs=$(grep_config "VERBOSE_LOGS" $OLDPIF);
-    ADVSETTINGS="spoofBuild spoofProps spoofProvider spoofSignature spoofVendingFinger spoofVendingSdk verboseLogs";
+    ADVSETTINGS="spoofBuild spoofProps spoofProvider spoofSignature spoofVendingFinger spoofVendingSdk";
     for SETTING in $ADVSETTINGS; do
       eval [ -z \"\$$SETTING\" ] \&\& $SETTING=$(grep_config "$SETTING" $OLDPIF);
       eval TMPVAL=\$$SETTING;

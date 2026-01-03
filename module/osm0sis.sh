@@ -227,6 +227,7 @@ if [ "$DIR" = /data/adb/modules/playintegrityfix/autopif4 ]; then
   done;
   item "Installing new prop ...";
   cp -fv $NEWNAME ..;
+<<<<<<< HEAD
   TS_DIR=/data/adb/tricky_store;
   if [ -d "$TS_DIR" ]; then
     TS_SECPAT=$TS_DIR/security_patch.txt;
@@ -256,8 +257,4 @@ EOF
     sed -i '$a\' $TS_SECPAT;
     cat $TS_SECPAT;
   fi;
-  if [ -f /data/adb/modules/playintegrityfix/killpi.sh ]; then
-    item "Killing any running GMS DroidGuard/Play Store processes ...";
-    sh /data/adb/modules/playintegrityfix/killpi.sh 2>&1 || true;
-  fi;
-fi;
+=======

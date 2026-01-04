@@ -146,7 +146,7 @@ if [ -z "$DEVICE_INITIAL_SDK_INT" -o "$DEVICE_INITIAL_SDK_INT" = "null" ]; then
   DEVICE_INITIAL_SDK_INT=25;
 fi;
 
-ADVSETTINGS="spoofBuild spoofProps spoofProvider spoofSignature spoofVendingFinger spoofVendingSdk verboseLogs";
+ADVSETTINGS="spoofBuild spoofProps spoofProvider spoofSignature spoofVendingFinger spoofVendingSdk";
 
 spoofBuild=1;
 spoofProps=1;
@@ -154,16 +154,17 @@ spoofProvider=1;
 spoofSignature=0;
 spoofVendingFinger=1;
 spoofVendingSdk=0;
-verboseLogs=0;
 
 keep_advanced() {
-  if grep -qE "verboseLogs|VERBOSE_LOGS" "$1"; then
+  if grep_check_config spoofVendingFinger "$1"; then
     item "Retaining existing configuration ...";
     ADVANCED=1;
-    grep_check_config VERBOSE_LOGS "$1" && verboseLogs="$(grep_get_config VERBOSE_LOGS "$1")";
+
     for SETTING in $ADVSETTINGS; do
-      eval grep_check_config $SETTING \"$1\" \&\& $SETTING=\"$(grep_get_config $SETTING "$1")\";
+      eval grep_check_config $SETTING \"$1\" \&\& \
+        $SETTING=\"$(grep_get_config $SETTING "$1")\";
     done;
+
     if grep -qE '#\*.security_patch|//"\*.security_patch"' "$1"; then
       case $FORMAT in
         json) SECURITY_COMMENT='//';;
@@ -172,6 +173,7 @@ keep_advanced() {
     fi;
   fi;
 }
+
 if [ -f "$OUT" ]; then
   keep_advanced "$OUT";
   item "Renaming old file to $(basename "$OUT").bak ...";

@@ -152,7 +152,7 @@ spoofBuild=1;
 spoofProps=1;
 spoofProvider=1;
 spoofSignature=0;
-spoofVendingFinger=0;
+spoofVendingFinger=1;
 spoofVendingSdk=0;
 verboseLogs=0;
 

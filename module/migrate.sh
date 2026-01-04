@@ -122,14 +122,57 @@ if [ -z "$DEVICE_INITIAL_SDK_INT" -o "$DEVICE_INITIAL_SDK_INT" = "null" ]; then
   DEVICE_INITIAL_SDK_INT=25;
 fi;
 
-ADVSETTINGS="spoofBuild spoofProps spoofProvider spoofSignature spoofVendingFinger spoofVendingSdk";
+ADVSETTINGS="spoofBuild spoofProps spoofProvider spoofSignature spoofVendingFinger spoofVendingSdk"
 
-spoofBuild=1;
-spoofProps=1;
-spoofProvider=1;
-spoofSignature=0;
-spoofVendingFinger=1;
-spoofVendingSdk=0;
+# Default advanced values
+spoofBuild=1
+spoofProps=1
+spoofProvider=1
+spoofSignature=0
+spoofVendingFinger=1
+spoofVendingSdk=0
+
+ADV_FILE="/data/adb/Box-Brain/advanced"
+LEGACY_FILE="/data/adb/Box-Brain/legacy"
+WIPE_FILE="/data/adb/Box-Brain/wipe"
+
+# Clear ADVANCED by default
+ADVANCED=0
+
+# Handle Wipe first
+if [ -f "$WIPE_FILE" ]; then
+    item "Wipe file exists, removing advanced properties ..."
+    ADVANCED=0  # skip writing advanced section
+    # Unset advanced variables in memory
+    for SETTING in $ADVSETTINGS; do
+        unset $SETTING
+    done
+    # Backup old file if exists
+    [ -f "$OUT" ] && mv -f "$OUT" "$OUT.bak"
+
+# Legacy mode
+elif [ -f "$LEGACY_FILE" ]; then
+    item "Legacy file exists, applying legacy advanced values ..."
+    spoofBuild=1
+    spoofProps=1
+    spoofProvider=0
+    spoofSignature=0
+    spoofVendingFinger=0
+    spoofVendingSdk=0
+    ADVANCED=1
+
+# Advanced mode
+elif [ -f "$ADV_FILE" ]; then
+    item "Advanced file exists, preserving existing advanced values ..."
+    ADVANCED=1
+    # Only preserve old values in advanced mode
+    keep_advanced "$FILE"
+
+# No control file
+else
+    item "No control file found, using default advanced values ..."
+    ADVANCED=1
+fi
 
 SECURITY_COMMENT=
 
@@ -148,16 +191,21 @@ keep_advanced() {
   done;
 }
 
-if [ -f "$OUT" ]; then
-  keep_advanced "$OUT";
-  item "Renaming old file to $(basename "$OUT").bak ...";
-  mv -f "$OUT" "$OUT.bak";
+if [ ! -f "$WIPE_FILE" ]; then
+    # Only preserve old advanced settings if not wiping
+    if [ -f "$OUT" ]; then
+        keep_advanced "$OUT";
+        item "Renaming old file to $(basename "$OUT").bak ...";
+        mv -f "$OUT" "$OUT.bak";
+    else
+        case "$FILE" in
+            *.prop) ;;
+            *) keep_advanced "$FILE";;
+        esac;
+    fi
 else
-  case "$FILE" in
-    *.prop) ;;
-    *) keep_advanced "$FILE";;
-  esac;
-fi;
+    item "Wipe mode: skipping Advanced Settings"
+fi
 
 [ "$INSTALL" ] || item "Writing fields and properties to updated custom.pif.prop ...";
 [ "$ADVANCED" ] && item "Adding Advanced Settings entries ...";
@@ -178,12 +226,15 @@ MID='='
   [ -z "$VNDK_VERSION" ] || echo "*.vndk.version$MID$VNDK_VERSION"
   echo "*api_level$MID$DEVICE_INITIAL_SDK_INT"
 
-  if [ "$ADVANCED" ]; then
-    echo
-    echo "$CMNT Advanced Settings"
-    for SETTING in $ADVSETTINGS; do
-      eval echo "$SETTING$MID\$$SETTING"
-    done
+  # Only write advanced settings if ADVANCED=1
+  if [ "$ADVANCED" ] && [ -n "$ADVSETTINGS" ]; then
+      echo
+      echo "$CMNT Advanced Settings"
+      for SETTING in $ADVSETTINGS; do
+          # Only write if variable exists and is non-empty
+          eval VAL=\$$SETTING
+          [ -n "$VAL" ] && echo "$SETTING$MID$VAL"
+      done
   fi
 } > "$OUT"
 

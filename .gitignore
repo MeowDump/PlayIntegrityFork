@@ -15,3 +15,5 @@ module/classes.dex
 module/pif.json
 module/zygisk/
 out/
+*.swp
+*.save

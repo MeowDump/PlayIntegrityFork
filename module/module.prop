@@ -1,6 +1,5 @@
 id=playintegrityfix
 name=Play Integrity Fork
-version=v16
-versionCode=164000
-author=osm0sis & chiteroman @ xda-developers
-description=Fix <A13 Play Integrity DEVICE verdict
+version=Test
+author=MeowDump (based on work by osm0sis & chiteroman @ xda-developers)
+description=Experimental fork. This build is unstable and intended for testing only. Flash at your own risk.

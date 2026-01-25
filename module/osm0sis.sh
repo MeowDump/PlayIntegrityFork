@@ -1,5 +1,16 @@
 #!/system/bin/sh
 
+#
+# This file is primarily adapted from PlayIntegrityFork
+# Original repository: https://github.com/osm0sis/PlayIntegrityFork
+#
+# Minor modifications by: https://github.com/MeowDump
+#
+# Copyright (C) 2026 Original author of PlayIntegrityFork (https://github.com/osm0sis)
+#
+# Licensed under GNU GPL‑3.0 ~ see LICENSE file for details.
+#
+
 # Enable verbose mode if requested
 [ "$VERBOSE_MODE" = 1 ] && set -x
 

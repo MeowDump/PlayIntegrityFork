@@ -124,13 +124,28 @@ fi;
 
 if [ -z "$SECURITY_PATCH" -o "$SECURITY_PATCH" = "null" ]; then
   item 'Missing SECURITY_PATCH value found, setting default ...';
-  SECURITY_PATCH="2026-01-01"
+  SECURITY_PATCH="2026-02-01"
 fi;
 
 if [ -z "$DEVICE_INITIAL_SDK_INT" -o "$DEVICE_INITIAL_SDK_INT" = "null" ]; then
   item 'Missing required DEVICE_INITIAL_SDK_INT field and "*api_level" property value found, setting to 25 ...';
   DEVICE_INITIAL_SDK_INT=25;
 fi;
+
+keep_advanced() {
+  for SETTING in $ADVSETTINGS; do
+    if grep_check_config "$SETTING" "$1"; then
+      item "Retaining existing configuration ...";
+      ADVANCED=1;
+
+      for SETTING in $ADVSETTINGS; do
+        eval grep_check_config $SETTING \"$1\" \&\& \
+          $SETTING=\"$(grep_get_config $SETTING "$1")\";
+      done;
+      break;
+    fi;
+  done;
+}
 
 ADVSETTINGS="spoofBuild spoofProps spoofProvider spoofSignature spoofVendingFinger spoofVendingSdk"
 
@@ -141,6 +156,14 @@ spoofProvider=1
 spoofSignature=0
 spoofVendingFinger=1
 spoofVendingSdk=0
+
+# Check if Google Wallet is installed
+if pm list packages | grep -q "com.google.android.apps.walletnfcrel"; then
+    item "com.google.android.apps.walletnfcrel is installed, setting spoofProvider to 0";
+    spoofProvider=0
+else
+    item "com.google.android.apps.walletnfcrel is not installed, keeping spoofProvider as 1";
+fi
 
 ADV_FILE="/data/adb/Box-Brain/advanced"
 LEGACY_FILE="/data/adb/Box-Brain/legacy"
@@ -185,21 +208,6 @@ else
 fi
 
 SECURITY_COMMENT=
-
-keep_advanced() {
-  for SETTING in $ADVSETTINGS; do
-    if grep_check_config "$SETTING" "$1"; then
-      item "Retaining existing configuration ...";
-      ADVANCED=1;
-
-      for SETTING in $ADVSETTINGS; do
-        eval grep_check_config $SETTING \"$1\" \&\& \
-          $SETTING=\"$(grep_get_config $SETTING "$1")\";
-      done;
-      break;
-    fi;
-  done;
-}
 
 if [ ! -f "$WIPE_FILE" ]; then
     # Only preserve old advanced settings if not wiping

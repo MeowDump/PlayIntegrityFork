@@ -9,13 +9,7 @@
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "PIF/Native", __VA_ARGS__)
 
 #define DEX_FILE_PATH "/data/adb/modules/playintegrityfix/classes.dex"
-
-#define PROP_FILE_PATH "/data/adb/modules/playintegrityfix/pif.prop"
 #define CUSTOM_PROP_FILE_PATH "/data/adb/modules/playintegrityfix/custom.pif.prop"
-
-#define JSON_FILE_PATH "/data/adb/modules/playintegrityfix/pif.json"
-#define CUSTOM_JSON_FILE_PATH "/data/adb/modules/playintegrityfix/custom.pif.json"
-
 #define VENDING_PACKAGE "com.android.vending"
 #define DROIDGUARD_PACKAGE "com.google.android.gms.unstable"
 
@@ -26,6 +20,12 @@ static int spoofProvider = 1;
 static int spoofSignature = 0;
 static int spoofVendingFinger = 0;
 static int spoofVendingSdk = 0;
+static int spoofPixel = 0;
+
+static std::string pixelManufacturer;
+static std::string pixelModel;
+static std::string pixelDevice;
+static std::string pixelBrand;
 
 static std::map<std::string, std::string> jsonProps;
 
@@ -35,16 +35,11 @@ static std::map<void *, T_Callback> callbacks;
 
 static void modify_callback(void *cookie, const char *name, const char *value, uint32_t serial) {
     if (cookie == nullptr || name == nullptr || value == nullptr || !callbacks.contains(cookie)) return;
-
     const char *oldValue = value;
-
     std::string prop(name);
-
     if (jsonProps.count(prop)) {
-        // Exact property match
         value = jsonProps[prop].c_str();
     } else {
-        // Leading * wildcard property match
         for (const auto &p: jsonProps) {
             if (p.first.starts_with("*") && prop.ends_with(p.first.substr(1))) {
                 value = p.second.c_str();
@@ -52,13 +47,11 @@ static void modify_callback(void *cookie, const char *name, const char *value, u
             }
         }
     }
-
-    if (oldValue == value) {
-        if (verboseLogs > 99) LOGD("[%s]: %s (unchanged)", name, oldValue);
-    } else {
+    if (oldValue != value) {
         LOGD("[%s]: %s -> %s", name, oldValue, value);
+    } else if (verboseLogs > 99) {
+        LOGD("[%s]: %s (unchanged)", name, oldValue);
     }
-
     return callbacks[cookie](cookie, name, value, serial);
 }
 
@@ -92,79 +85,55 @@ public:
 
     void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
         bool isGms = false, isDroidGuardOrVending = false;
-
         auto rawProcess = env->GetStringUTFChars(args->nice_name, nullptr);
         auto rawDir = env->GetStringUTFChars(args->app_data_dir, nullptr);
-
-        // Prevent crash on apps with no data dir
         if (rawDir == nullptr) {
             env->ReleaseStringUTFChars(args->nice_name, rawProcess);
             api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
             return;
         }
-
         pkgName = rawProcess;
         std::string_view dir(rawDir);
-
         isGms = dir.ends_with("/com.google.android.gms") || dir.ends_with("/com.android.vending");
         isDroidGuardOrVending = pkgName == DROIDGUARD_PACKAGE || pkgName == VENDING_PACKAGE;
-
         env->ReleaseStringUTFChars(args->nice_name, rawProcess);
         env->ReleaseStringUTFChars(args->app_data_dir, rawDir);
-
         if (!isGms) {
             api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
             return;
         }
-
-        // We are in GMS now, force unmount
         api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
-
         if (!isDroidGuardOrVending) {
             api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
             return;
         }
-
         std::vector<char> configVector;
         long dexSize = 0, configSize = 0;
-
         int fd = api->connectCompanion();
-
         read(fd, &dexSize, sizeof(long));
         read(fd, &configSize, sizeof(long));
-
         if (dexSize < 1) {
             close(fd);
             LOGD("Couldn't read dex file");
             api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
             return;
         }
-
         if (configSize < 1) {
             close(fd);
             LOGD("Couldn't read config file");
             api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
             return;
         }
-
         LOGD("Read from file descriptor for 'dex' -> %ld bytes", dexSize);
         LOGD("Read from file descriptor for 'config' -> %ld bytes", configSize);
-
         dexVector.resize(dexSize);
         read(fd, dexVector.data(), dexSize);
-
         configVector.resize(configSize);
         read(fd, configVector.data(), configSize);
-
         close(fd);
-
         std::string configString(configVector.cbegin(), configVector.cend());
-
         if (!nlohmann::json::accept(configString, true)) {
-            LOGD("Converting config from prop format to JSON format");
-
             configString.erase(std::remove(configString.begin(), configString.end(), '\r'), configString.end());
-
             std::string jsonString = "{";
             char propDelimiter = '=';
             char commentDelimiter = '#';
@@ -179,7 +148,6 @@ public:
                     name = line.substr(0, propDelimiterPos);
                     value = line.substr(propDelimiterPos + 1);
                 } else {
-                    LOGD("Invalid prop entry, skipping");
                     continue;
                 }
                 size_t commentDelimiterPos = value.find(commentDelimiter);
@@ -192,29 +160,21 @@ public:
             }
             if (jsonString.back() == ',') jsonString.pop_back();
             jsonString += "\n}\n";
-
             configString = jsonString;
-
             jsonString.clear();
         }
-
         json = nlohmann::json::parse(configString, nullptr, false, true);
-
         configVector.clear();
         configString.clear();
     }
 
     void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
         if (dexVector.empty() || json.empty()) return;
-
         readJson();
-
         if (pkgName == VENDING_PACKAGE) spoofBuild = spoofProps = spoofProvider = spoofSignature = 0;
-        else spoofVendingFinger = spoofVendingSdk = 0;
-
+        else spoofVendingFinger = spoofVendingSdk = spoofPixel = 0;
         if (spoofProps > 0) doHook();
-        if (spoofBuild + spoofProvider + spoofSignature + spoofVendingFinger + spoofVendingSdk > 0) inject();
-
+        if (spoofBuild + spoofProvider + spoofSignature + spoofVendingFinger + spoofVendingSdk + spoofPixel > 0) inject();
         dexVector.clear();
         json.clear();
     }
@@ -233,25 +193,15 @@ private:
 
     void readJson() {
         LOGD("JSON contains %d keys!", static_cast<int>(json.size()));
-
-        // Verbose logging level
         if (json.contains("verboseLogs")) {
             if (!json["verboseLogs"].is_null() && json["verboseLogs"].is_string() && json["verboseLogs"] != "") {
                 verboseLogs = stoi(json["verboseLogs"].get<std::string>());
-                if (verboseLogs > 0) LOGD("Verbose logging (level %d) enabled!", verboseLogs);
-            } else {
-                LOGD("Error parsing verboseLogs!");
             }
             json.erase("verboseLogs");
         }
-
-        // Vending advanced spoofing settings
         if (json.contains("spoofVendingSdk")) {
             if (!json["spoofVendingSdk"].is_null() && json["spoofVendingSdk"].is_string() && json["spoofVendingSdk"] != "") {
                 spoofVendingSdk = stoi(json["spoofVendingSdk"].get<std::string>());
-                if (verboseLogs > 0) LOGD("Spoofing SDK Level in Play Store %s!", (spoofVendingSdk > 0) ? "enabled" : "disabled");
-            } else {
-                LOGD("Error parsing spoofVendingSdk!");
             }
             json.erase("spoofVendingSdk");
         }
@@ -263,77 +213,69 @@ private:
                 } else if (json.contains("FINGERPRINT") && !json["FINGERPRINT"].is_null() && json["FINGERPRINT"].is_string() && json["FINGERPRINT"] != "") {
                     spoofVendingFinger = stoi(json["spoofVendingFinger"].get<std::string>());
                     vendingFingerprintValue = json["FINGERPRINT"].get<std::string>();
-                } else {
-                    LOGD("Error parsing spoofVendingFinger or FINGERPRINT field!");
                 }
-                if (verboseLogs > 0) LOGD("Spoofing Fingerprint in Play Store %s!", (spoofVendingFinger > 0) ? "enabled" : "disabled");
-            } else {
-                LOGD("Error parsing spoofVendingFinger!");
             }
             json.erase("spoofVendingFinger");
+        }
+        if (json.contains("spoofPixel")) {
+            if (!json["spoofPixel"].is_null() && json["spoofPixel"].is_string() && json["spoofPixel"] != "") {
+                spoofPixel = stoi(json["spoofPixel"].get<std::string>());
+                if (spoofPixel > 0) {
+                    if (json.contains("MANUFACTURER") && !json["MANUFACTURER"].is_null() && json["MANUFACTURER"].is_string()) {
+                        pixelManufacturer = json["MANUFACTURER"].get<std::string>();
+                    }
+                    if (json.contains("MODEL") && !json["MODEL"].is_null() && json["MODEL"].is_string()) {
+                        pixelModel = json["MODEL"].get<std::string>();
+                    }
+                    if (json.contains("DEVICE") && !json["DEVICE"].is_null() && json["DEVICE"].is_string()) {
+                        pixelDevice = json["DEVICE"].get<std::string>();
+                    }
+                    if (json.contains("BRAND") && !json["BRAND"].is_null() && json["BRAND"].is_string()) {
+                        pixelBrand = json["BRAND"].get<std::string>();
+                    }
+                }
+            }
+            json.erase("spoofPixel");
         }
         if (pkgName == VENDING_PACKAGE) {
             json.clear();
             return;
         }
-
-        // DroidGuard advanced spoofing settings
         if (json.contains("spoofBuild")) {
             if (!json["spoofBuild"].is_null() && json["spoofBuild"].is_string() && json["spoofBuild"] != "") {
                 spoofBuild = stoi(json["spoofBuild"].get<std::string>());
-                if (verboseLogs > 0) LOGD("Spoofing Build Fields %s!", (spoofBuild > 0) ? "enabled" : "disabled");
-            } else {
-                LOGD("Error parsing spoofBuild!");
             }
             json.erase("spoofBuild");
         }
         if (json.contains("spoofProps")) {
             if (!json["spoofProps"].is_null() && json["spoofProps"].is_string() && json["spoofProps"] != "") {
                 spoofProps = stoi(json["spoofProps"].get<std::string>());
-                if (verboseLogs > 0) LOGD("Spoofing System Properties %s!", (spoofProps > 0) ? "enabled" : "disabled");
-            } else {
-                LOGD("Error parsing spoofProps!");
             }
             json.erase("spoofProps");
         }
         if (json.contains("spoofProvider")) {
             if (!json["spoofProvider"].is_null() && json["spoofProvider"].is_string() && json["spoofProvider"] != "") {
                 spoofProvider = stoi(json["spoofProvider"].get<std::string>());
-                if (verboseLogs > 0) LOGD("Spoofing Keystore Provider %s!", (spoofProvider > 0) ? "enabled" : "disabled");
-            } else {
-                LOGD("Error parsing spoofProvider!");
             }
             json.erase("spoofProvider");
         }
         if (json.contains("spoofSignature")) {
             if (!json["spoofSignature"].is_null() && json["spoofSignature"].is_string() && json["spoofSignature"] != "") {
                 spoofSignature = stoi(json["spoofSignature"].get<std::string>());
-                if (verboseLogs > 0) LOGD("Spoofing ROM Signature %s!", (spoofSignature > 0) ? "enabled" : "disabled");
-            } else {
-                LOGD("Error parsing spoofSignature!");
             }
             json.erase("spoofSignature");
         }
-
         std::vector<std::string> eraseKeys;
         for (auto &jsonList: json.items()) {
-            if (verboseLogs > 1) LOGD("Parsing %s", jsonList.key().c_str());
             if (jsonList.key().find_first_of("*.") != std::string::npos) {
-                // Name contains . or * (wildcard) so assume real property name
                 if (!jsonList.value().is_null() && jsonList.value().is_string()) {
-                    if (jsonList.value() == "") {
-                        LOGD("%s is empty, skipping", jsonList.key().c_str());
-                    } else {
-                        if (verboseLogs > 0) LOGD("Adding '%s' to properties list", jsonList.key().c_str());
+                    if (jsonList.value() != "") {
                         jsonProps[jsonList.key()] = jsonList.value();
                     }
-                } else {
-                    LOGD("Error parsing %s!", jsonList.key().c_str());
                 }
                 eraseKeys.push_back(jsonList.key());
             }
         }
-        // Remove properties from parsed JSON
         for (auto key: eraseKeys) {
             if (json.contains(key)) json.erase(key);
         }
@@ -341,38 +283,40 @@ private:
 
     void inject() {
         const char* niceName = pkgName == VENDING_PACKAGE ? "PS" : "DG";
-
         LOGD("JNI %s: Getting system classloader", niceName);
         auto clClass = env->FindClass("java/lang/ClassLoader");
         auto getSystemClassLoader = env->GetStaticMethodID(clClass, "getSystemClassLoader", "()Ljava/lang/ClassLoader;");
         auto systemClassLoader = env->CallStaticObjectMethod(clClass, getSystemClassLoader);
-
         LOGD("JNI %s: Creating module classloader", niceName);
         auto dexClClass = env->FindClass("dalvik/system/InMemoryDexClassLoader");
         auto dexClInit = env->GetMethodID(dexClClass, "<init>", "(Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;)V");
         auto buffer = env->NewDirectByteBuffer(dexVector.data(), static_cast<jlong>(dexVector.size()));
         auto dexCl = env->NewObject(dexClClass, dexClInit, buffer, systemClassLoader);
-
         LOGD("JNI %s: Loading module class", niceName);
         auto loadClass = env->GetMethodID(clClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
         const char* className = pkgName == VENDING_PACKAGE ? "es.chiteroman.playintegrityfix.EntryPointVending" : "es.chiteroman.playintegrityfix.EntryPoint";
         auto entryClassName = env->NewStringUTF(className);
         auto entryClassObj = env->CallObjectMethod(dexCl, loadClass, entryClassName);
-
         auto entryClass = (jclass) entryClassObj;
-
         if (pkgName == VENDING_PACKAGE) {
             LOGD("JNI %s: Calling EntryPointVending.init", niceName);
-            auto entryInit = env->GetStaticMethodID(entryClass, "init", "(IIILjava/lang/String;)V");
-            auto javaStr = env->NewStringUTF(vendingFingerprintValue.c_str());
-            env->CallStaticVoidMethod(entryClass, entryInit, verboseLogs, spoofVendingFinger, spoofVendingSdk, javaStr);
-            env->DeleteLocalRef(javaStr);
+            auto entryInit = env->GetStaticMethodID(entryClass, "init", "(IIILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
+            auto javaFinger = env->NewStringUTF(vendingFingerprintValue.c_str());
+            auto javaManuf = env->NewStringUTF(pixelManufacturer.c_str());
+            auto javaModel = env->NewStringUTF(pixelModel.c_str());
+            auto javaDevice = env->NewStringUTF(pixelDevice.c_str());
+            auto javaBrand = env->NewStringUTF(pixelBrand.c_str());
+            env->CallStaticVoidMethod(entryClass, entryInit, verboseLogs, spoofVendingFinger, spoofVendingSdk, javaFinger, javaManuf, javaModel, javaDevice, javaBrand);
+            env->DeleteLocalRef(javaFinger);
+            env->DeleteLocalRef(javaManuf);
+            env->DeleteLocalRef(javaModel);
+            env->DeleteLocalRef(javaDevice);
+            env->DeleteLocalRef(javaBrand);
         } else {
             LOGD("JNI %s: Sending JSON", niceName);
             auto receiveJson = env->GetStaticMethodID(entryClass, "receiveJson", "(Ljava/lang/String;)V");
             auto javaStr = env->NewStringUTF(json.dump().c_str());
             env->CallStaticVoidMethod(entryClass, receiveJson, javaStr);
-
             LOGD("JNI %s: Calling EntryPoint.init", niceName);
             auto entryInit = env->GetStaticMethodID(entryClass, "init", "(IIII)V");
             env->CallStaticVoidMethod(entryClass, entryInit, verboseLogs, spoofBuild, spoofProvider, spoofSignature);
@@ -391,45 +335,28 @@ private:
 static void companion(int fd) {
     long dexSize = 0, configSize = 0;
     std::vector<char> dexVector, configVector;
-
     FILE *dex = fopen(DEX_FILE_PATH, "rb");
-
     if (dex) {
         fseek(dex, 0, SEEK_END);
         dexSize = ftell(dex);
         fseek(dex, 0, SEEK_SET);
-
         dexVector.resize(dexSize);
         fread(dexVector.data(), 1, dexSize, dex);
-
         fclose(dex);
     }
-
     FILE *config = fopen(CUSTOM_PROP_FILE_PATH, "r");
-    if (!config)
-        config = fopen(CUSTOM_JSON_FILE_PATH, "r");
-    if (!config)
-        config = fopen(PROP_FILE_PATH, "r");
-    if (!config)
-        config = fopen(JSON_FILE_PATH, "r");
-
     if (config) {
         fseek(config, 0, SEEK_END);
         configSize = ftell(config);
         fseek(config, 0, SEEK_SET);
-
         configVector.resize(configSize);
         fread(configVector.data(), 1, configSize, config);
-
         fclose(config);
     }
-
     write(fd, &dexSize, sizeof(long));
     write(fd, &configSize, sizeof(long));
-
     write(fd, dexVector.data(), dexSize);
     write(fd, configVector.data(), configSize);
-
     dexVector.clear();
     configVector.clear();
 }

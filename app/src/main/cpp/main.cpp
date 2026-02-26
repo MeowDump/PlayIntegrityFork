@@ -1,9 +1,13 @@
 #include <android/log.h>
 #include <sys/system_properties.h>
 #include <unistd.h>
+#include <map>
+#include <string>
+#include <vector>
+#include <sstream>
+#include <algorithm>
 
 #include "zygisk.hpp"
-#include "json/single_include/nlohmann/json.hpp"
 #include "dobby.h"
 
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "PIF/Native", __VA_ARGS__)
@@ -26,7 +30,9 @@ static std::string pixelManufacturer;
 static std::string pixelModel;
 static std::string pixelDevice;
 static std::string pixelBrand;
+static std::string vendingFingerprintValue;
 
+static std::map<std::string, std::string> propMap;
 static std::map<std::string, std::string> jsonProps;
 
 typedef void (*T_Callback)(void *, const char *, const char *, uint32_t);
@@ -131,52 +137,22 @@ public:
         configVector.resize(configSize);
         read(fd, configVector.data(), configSize);
         close(fd);
-        std::string configString(configVector.cbegin(), configVector.cend());
-        if (!nlohmann::json::accept(configString, true)) {
-            configString.erase(std::remove(configString.begin(), configString.end(), '\r'), configString.end());
-            std::string jsonString = "{";
-            char propDelimiter = '=';
-            char commentDelimiter = '#';
-            size_t beginPos = 0, endPos = 0;
-            while ((endPos = configString.find('\n', beginPos)) != std::string::npos) {
-                std::string line = configString.substr(beginPos, endPos - beginPos);
-                beginPos = endPos + 1;
-                if (line.empty() || line[0] == '#') continue;
-                std::string name, value;
-                size_t propDelimiterPos = line.find(propDelimiter);
-                if (propDelimiterPos != std::string::npos) {
-                    name = line.substr(0, propDelimiterPos);
-                    value = line.substr(propDelimiterPos + 1);
-                } else {
-                    continue;
-                }
-                size_t commentDelimiterPos = value.find(commentDelimiter);
-                if (commentDelimiterPos != std::string::npos) {
-                    value = value.substr(0, commentDelimiterPos);
-                    size_t lastPos = value.find_last_not_of(" ");
-                    if (lastPos != std::string::npos) value.resize(lastPos + 1);
-                }
-                jsonString += "\n\"" + name + "\": \"" + value + "\",";
-            }
-            if (jsonString.back() == ',') jsonString.pop_back();
-            jsonString += "\n}\n";
-            configString = jsonString;
-            jsonString.clear();
-        }
-        json = nlohmann::json::parse(configString, nullptr, false, true);
+        
+        // Parse PROP file directly into propMap
+        parsePropFile(configVector);
         configVector.clear();
-        configString.clear();
     }
 
     void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
-        if (dexVector.empty() || json.empty()) return;
-        readJson();
+        if (dexVector.empty() || propMap.empty()) return;
+        readConfig();
         if (pkgName == VENDING_PACKAGE) spoofBuild = spoofProps = spoofProvider = spoofSignature = 0;
         else spoofVendingFinger = spoofVendingSdk = spoofPixel = 0;
         if (spoofProps > 0) doHook();
         if (spoofBuild + spoofProvider + spoofSignature + spoofVendingFinger + spoofVendingSdk + spoofPixel > 0) inject();
         dexVector.clear();
-        json.clear();
+        propMap.clear();
+        jsonProps.clear();
     }
 
     void preServerSpecialize(zygisk::ServerSpecializeArgs *args) override {
@@ -187,98 +163,160 @@ private:
     zygisk::Api *api = nullptr;
     JNIEnv *env = nullptr;
     std::vector<char> dexVector;
-    nlohmann::json json;
     std::string pkgName;
-    std::string vendingFingerprintValue;
 
-    void readJson() {
-        LOGD("JSON contains %d keys!", static_cast<int>(json.size()));
-        if (json.contains("verboseLogs")) {
-            if (!json["verboseLogs"].is_null() && json["verboseLogs"].is_string() && json["verboseLogs"] != "") {
-                verboseLogs = stoi(json["verboseLogs"].get<std::string>());
+    void parsePropFile(const std::vector<char>& configVector) {
+        std::string configString(configVector.begin(), configVector.end());
+        
+        // Remove carriage returns
+        configString.erase(std::remove(configString.begin(), configString.end(), '\r'), configString.end());
+        
+        char propDelimiter = '=';
+        char commentDelimiter = '#';
+        size_t beginPos = 0, endPos = 0;
+        
+        while ((endPos = configString.find('\n', beginPos)) != std::string::npos) {
+            std::string line = configString.substr(beginPos, endPos - beginPos);
+            beginPos = endPos + 1;
+            
+            if (line.empty() || line[0] == '#') continue;
+            
+            std::string name, value;
+            size_t propDelimiterPos = line.find(propDelimiter);
+            
+            if (propDelimiterPos != std::string::npos) {
+                name = line.substr(0, propDelimiterPos);
+                value = line.substr(propDelimiterPos + 1);
+            } else {
+                continue;
             }
-            json.erase("verboseLogs");
-        }
-        if (json.contains("spoofVendingSdk")) {
-            if (!json["spoofVendingSdk"].is_null() && json["spoofVendingSdk"].is_string() && json["spoofVendingSdk"] != "") {
-                spoofVendingSdk = stoi(json["spoofVendingSdk"].get<std::string>());
+            
+            // Remove inline comments and trailing spaces
+            size_t commentDelimiterPos = value.find(commentDelimiter);
+            if (commentDelimiterPos != std::string::npos) {
+                value = value.substr(0, commentDelimiterPos);
+                size_t lastPos = value.find_last_not_of(" ");
+                if (lastPos != std::string::npos) value.resize(lastPos + 1);
             }
-            json.erase("spoofVendingSdk");
+            
+            // Trim leading/trailing whitespace from name
+            size_t nameStart = name.find_first_not_of(" ");
+            size_t nameEnd = name.find_last_not_of(" ");
+            if (nameStart != std::string::npos && nameEnd != std::string::npos) {
+                name = name.substr(nameStart, nameEnd - nameStart + 1);
+            }
+            
+            // Trim leading/trailing whitespace from value
+            size_t valueStart = value.find_first_not_of(" ");
+            size_t valueEnd = value.find_last_not_of(" ");
+            if (valueStart != std::string::npos && valueEnd != std::string::npos) {
+                value = value.substr(valueStart, valueEnd - valueStart + 1);
+            }
+            
+            if (!name.empty()) {
+                propMap[name] = value;
+            }
         }
-        if (json.contains("spoofVendingFinger")) {
-            if (!json["spoofVendingFinger"].is_null() && json["spoofVendingFinger"].is_string() && json["spoofVendingFinger"] != "") {
-                if (json["spoofVendingFinger"].get<std::string>().find_first_not_of("01") != std::string::npos) {
-                    spoofVendingFinger = 1;
-                    vendingFingerprintValue = json["spoofVendingFinger"].get<std::string>();
-                } else if (json.contains("FINGERPRINT") && !json["FINGERPRINT"].is_null() && json["FINGERPRINT"].is_string() && json["FINGERPRINT"] != "") {
-                    spoofVendingFinger = stoi(json["spoofVendingFinger"].get<std::string>());
-                    vendingFingerprintValue = json["FINGERPRINT"].get<std::string>();
+        
+        LOGD("Parsed %d properties from config file", static_cast<int>(propMap.size()));
+    }
+
+    std::string getPropValue(const std::string& key, const std::string& defaultValue = "") {
+        auto it = propMap.find(key);
+        if (it != propMap.end() && !it->second.empty()) {
+            return it->second;
+        }
+        return defaultValue;
+    }
+
+    int getPropInt(const std::string& key, int defaultValue = 0) {
+        std::string value = getPropValue(key);
+        if (!value.empty()) {
+            try {
+                return std::stoi(value);
+            } catch (...) {
+                return defaultValue;
+            }
+        }
+        return defaultValue;
+    }
+
+    void readConfig() {
+        LOGD("Config contains %d keys!", static_cast<int>(propMap.size()));
+        
+        verboseLogs = getPropInt("verboseLogs");
+        spoofVendingSdk = getPropInt("spoofVendingSdk");
+        
+        std::string spoofVendingFingerValue = getPropValue("spoofVendingFinger");
+        if (!spoofVendingFingerValue.empty()) {
+            if (spoofVendingFingerValue.find_first_not_of("01") != std::string::npos) {
+                spoofVendingFinger = 1;
+                vendingFingerprintValue = spoofVendingFingerValue;
+            } else {
+                spoofVendingFinger = std::stoi(spoofVendingFingerValue);
+                if (spoofVendingFinger > 0) {
+                    vendingFingerprintValue = getPropValue("FINGERPRINT");
                 }
             }
-            json.erase("spoofVendingFinger");
         }
-        if (json.contains("spoofPixel")) {
-            if (!json["spoofPixel"].is_null() && json["spoofPixel"].is_string() && json["spoofPixel"] != "") {
-                spoofPixel = stoi(json["spoofPixel"].get<std::string>());
-                if (spoofPixel > 0) {
-                    if (json.contains("MANUFACTURER") && !json["MANUFACTURER"].is_null() && json["MANUFACTURER"].is_string()) {
-                        pixelManufacturer = json["MANUFACTURER"].get<std::string>();
-                    }
-                    if (json.contains("MODEL") && !json["MODEL"].is_null() && json["MODEL"].is_string()) {
-                        pixelModel = json["MODEL"].get<std::string>();
-                    }
-                    if (json.contains("DEVICE") && !json["DEVICE"].is_null() && json["DEVICE"].is_string()) {
-                        pixelDevice = json["DEVICE"].get<std::string>();
-                    }
-                    if (json.contains("BRAND") && !json["BRAND"].is_null() && json["BRAND"].is_string()) {
-                        pixelBrand = json["BRAND"].get<std::string>();
-                    }
-                }
-            }
-            json.erase("spoofPixel");
+        
+        spoofPixel = getPropInt("spoofPixel");
+        if (spoofPixel > 0) {
+            pixelManufacturer = getPropValue("MANUFACTURER");
+            pixelModel = getPropValue("MODEL");
+            pixelDevice = getPropValue("DEVICE");
+            pixelBrand = getPropValue("BRAND");
         }
+        
         if (pkgName == VENDING_PACKAGE) {
-            json.clear();
+            propMap.clear();
             return;
         }
-        if (json.contains("spoofBuild")) {
-            if (!json["spoofBuild"].is_null() && json["spoofBuild"].is_string() && json["spoofBuild"] != "") {
-                spoofBuild = stoi(json["spoofBuild"].get<std::string>());
-            }
-            json.erase("spoofBuild");
-        }
-        if (json.contains("spoofProps")) {
-            if (!json["spoofProps"].is_null() && json["spoofProps"].is_string() && json["spoofProps"] != "") {
-                spoofProps = stoi(json["spoofProps"].get<std::string>());
-            }
-            json.erase("spoofProps");
-        }
-        if (json.contains("spoofProvider")) {
-            if (!json["spoofProvider"].is_null() && json["spoofProvider"].is_string() && json["spoofProvider"] != "") {
-                spoofProvider = stoi(json["spoofProvider"].get<std::string>());
-            }
-            json.erase("spoofProvider");
-        }
-        if (json.contains("spoofSignature")) {
-            if (!json["spoofSignature"].is_null() && json["spoofSignature"].is_string() && json["spoofSignature"] != "") {
-                spoofSignature = stoi(json["spoofSignature"].get<std::string>());
-            }
-            json.erase("spoofSignature");
-        }
-        std::vector<std::string> eraseKeys;
-        for (auto &jsonList: json.items()) {
-            if (jsonList.key().find_first_of("*.") != std::string::npos) {
-                if (!jsonList.value().is_null() && jsonList.value().is_string()) {
-                    if (jsonList.value() != "") {
-                        jsonProps[jsonList.key()] = jsonList.value();
-                    }
+        
+        spoofBuild = getPropInt("spoofBuild", 1);
+        spoofProps = getPropInt("spoofProps", 1);
+        spoofProvider = getPropInt("spoofProvider", 1);
+        spoofSignature = getPropInt("spoofSignature");
+        
+        // Process wildcard properties for prop hooking
+        for (const auto& pair : propMap) {
+            if (pair.first.find_first_of("*.") != std::string::npos) {
+                if (!pair.second.empty()) {
+                    jsonProps[pair.first] = pair.second;
                 }
-                eraseKeys.push_back(jsonList.key());
             }
         }
-        for (auto key: eraseKeys) {
-            if (json.contains(key)) json.erase(key);
+    }
+
+    std::string buildJsonString() {
+        // Build JSON string manually for Java side
+        std::string jsonStr = "{";
+        bool first = true;
+        
+        for (const auto& pair : propMap) {
+            if (pair.first.find_first_of("*.") == std::string::npos) {
+                if (!first) jsonStr += ",";
+                first = false;
+                
+                // Simple JSON escaping for values
+                std::string escapedValue = pair.second;
+                size_t pos = 0;
+                while ((pos = escapedValue.find('\\', pos)) != std::string::npos) {
+                    escapedValue.insert(pos, "\\");
+                    pos += 2;
+                }
+                pos = 0;
+                while ((pos = escapedValue.find('"', pos)) != std::string::npos) {
+                    escapedValue.insert(pos, "\\");
+                    pos += 2;
+                }
+                
+                jsonStr += "\"" + pair.first + "\":\"" + escapedValue + "\"";
+            }
         }
+        
+        jsonStr += "}";
+        return jsonStr;
     }
 
     void inject() {
@@ -315,7 +353,8 @@ private:
         } else {
             LOGD("JNI %s: Sending JSON", niceName);
             auto receiveJson = env->GetStaticMethodID(entryClass, "receiveJson", "(Ljava/lang/String;)V");
-            auto javaStr = env->NewStringUTF(json.dump().c_str());
+            std::string jsonStr = buildJsonString();
+            auto javaStr = env->NewStringUTF(jsonStr.c_str());
             env->CallStaticVoidMethod(entryClass, receiveJson, javaStr);
             LOGD("JNI %s: Calling EntryPoint.init", niceName);
             auto entryInit = env->GetStaticMethodID(entryClass, "init", "(IIII)V");

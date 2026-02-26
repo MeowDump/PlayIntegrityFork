@@ -231,14 +231,27 @@ private:
 
     int getPropInt(const std::string& key, int defaultValue = 0) {
         std::string value = getPropValue(key);
-        if (!value.empty()) {
-            try {
-                return std::stoi(value);
-            } catch (...) {
+        if (value.empty()) return defaultValue;
+    
+        size_t pos = 0;
+        if (value[pos] == '-' || value[pos] == '+') pos++;
+        if (pos >= value.length()) return defaultValue;
+    
+        for (; pos < value.length(); pos++) {
+            if (!std::isdigit(static_cast<unsigned char>(value[pos]))) {
                 return defaultValue;
             }
         }
-        return defaultValue;
+    
+        char* endptr = nullptr;
+        long result = std::strtol(value.c_str(), &endptr, 10);
+    
+        if (endptr == value.c_str() || *endptr != '\0' || 
+            result > INT_MAX || result < INT_MIN) {
+            return defaultValue;
+        }
+    
+        return static_cast<int>(result);
     }
 
     void readConfig() {

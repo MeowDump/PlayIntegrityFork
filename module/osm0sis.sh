@@ -1,6 +1,5 @@
 #!/system/bin/sh
 
-#
 # This file is primarily adapted from PlayIntegrityFork
 # Original repository: https://github.com/osm0sis/PlayIntegrityFork
 #
@@ -9,7 +8,6 @@
 # Copyright (C) 2026 Original author of PlayIntegrityFork (https://github.com/osm0sis)
 #
 # Licensed under GNU GPL‑3.0 ~ see LICENSE file for details.
-#
 
 # Enable verbose mode if requested
 [ "$VERBOSE_MODE" = 1 ] && set -x
@@ -256,7 +254,7 @@ MODEL=$MODEL
 FINGERPRINT=google/$PRODUCT/$DEVICE:CANARY/$ID/$INCREMENTAL:user/release-keys
 PRODUCT=$PRODUCT
 DEVICE=$DEVICE
-SECURITY_PATCH=2026-02-01
+SECURITY_PATCH=2026-03-01
 DEVICE_INITIAL_SDK_INT=32
 EOF
 
@@ -292,7 +290,7 @@ if [ -f "$MIGRATE" ]; then
         esac;
       fi;
     }
-    ADVSETTINGS="spoofBuild spoofProps spoofProvider spoofSignature spoofVendingFinger spoofVendingSdk";
+    ADVSETTINGS="spoofBuild spoofProps spoofProvider spoofSignature spoofVendingFinger spoofVendingSdk spoofPixel";
     for SETTING in $ADVSETTINGS; do
       eval [ -z \"\$$SETTING\" ] \&\& $SETTING=$(grep_config "$SETTING" $OLDPIF);
       eval TMPVAL=\$$SETTING;

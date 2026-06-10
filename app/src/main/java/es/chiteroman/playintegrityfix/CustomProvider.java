@@ -12,9 +12,11 @@ public final class CustomProvider extends Provider {
 
     @Override
     public synchronized Service getService(String type, String algorithm) {
-        if (EntryPoint.getVerboseLogs() > 2) EntryPoint.LOG(String.format("Service: Caller type '%s' with algorithm '%s'", type, algorithm));
-        if (EntryPoint.getSpoofBuildEnabled() > 0) {
-            if (type.equals("KeyStore")) EntryPoint.spoofDevice();
+        if (EntryPoint.getVerboseLogs() > 2) {
+            EntryPoint.LOG("service " + type + " " + algorithm);
+        }
+        if (EntryPoint.getSpoofBuildEnabled() > 0 && "KeyStore".equals(type)) {
+            EntryPoint.spoofDevice();
         }
         return super.getService(type, algorithm);
     }

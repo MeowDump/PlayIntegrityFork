@@ -9,15 +9,12 @@ import android.os.Parcelable;
 import android.util.Base64;
 import android.util.JsonReader;
 import android.util.Log;
-
 import org.lsposed.hiddenapibypass.HiddenApiBypass;
-
 import java.io.IOException;
 import java.io.StringReader;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.security.KeyStore;
-import java.security.KeyStoreException;
 import java.security.KeyStoreSpi;
 import java.security.Provider;
 import java.security.Security;
@@ -25,8 +22,9 @@ import java.util.HashMap;
 import java.util.Map;
 
 public final class EntryPoint {
-    private static Integer verboseLogs = 0;
-    private static Integer spoofBuildEnabled = 1;
+    private static int verboseLogs = 0;
+    private static int spoofBuildEnabled = 1;
+    private static final String TAG = "PIF/Java:DG";
 
     private static final String signatureData = "MIIFyTCCA7GgAwIBAgIVALyxxl+zDS9SL68SzOr48309eAZyMA0GCSqGSIb3DQEBCwUAMHQxCzAJ\n" +
             "BgNVBAYTAlVTMRMwEQYDVQQIEwpDYWxpZm9ybmlhMRYwFAYDVQQHEw1Nb3VudGFpbiBWaWV3MRQw\n" +
@@ -58,17 +56,13 @@ public final class EntryPoint {
 
     private static final Map<String, String> map = new HashMap<>();
 
-    public static Integer getVerboseLogs() {
-        return verboseLogs;
-    }
-
-    public static Integer getSpoofBuildEnabled() {
-        return spoofBuildEnabled;
-    }
+    public static int getVerboseLogs() { return verboseLogs; }
+    public static int getSpoofBuildEnabled() { return spoofBuildEnabled; }
 
     public static void init(int logLevel, int spoofBuildVal, int spoofProviderVal, int spoofSignatureVal) {
         verboseLogs = logLevel;
         spoofBuildEnabled = spoofBuildVal;
+        LOGI("init verbose=" + logLevel + " build=" + spoofBuildVal + " provider=" + spoofProviderVal + " signature=" + spoofSignatureVal);
         if (verboseLogs > 99) logFields();
         if (spoofProviderVal > 0) spoofProvider();
         if (spoofBuildVal > 0) spoofDevice();
@@ -76,110 +70,118 @@ public final class EntryPoint {
     }
 
     public static void receiveJson(String data) {
+        LOGI("receiveJson len=" + (data != null ? data.length() : 0));
+        if (data == null || data.isEmpty()) {
+            LOGE("json empty");
+            return;
+        }
+        map.clear();
         try (JsonReader reader = new JsonReader(new StringReader(data))) {
             reader.beginObject();
             while (reader.hasNext()) {
-                map.put(reader.nextName(), reader.nextString());
+                String name = reader.nextName();
+                String value = reader.nextString();
+                map.put(name, value);
+                if (verboseLogs > 2) LOG("json " + name + "=" + value);
             }
             reader.endObject();
-        } catch (IOException|IllegalStateException e) {
-            LOG("Couldn't read JSON from Zygisk: " + e);
+            LOGI("parsed " + map.size() + " fields");
+        } catch (Exception e) {
+            LOGE("json parse failed: " + e.getMessage());
             map.clear();
-            return;
         }
     }
 
     private static void spoofProvider() {
-        final String KEYSTORE = "AndroidKeyStore";
-
+        LOGI("spoof provider");
         try {
-            Provider provider = Security.getProvider(KEYSTORE);
-            KeyStore keyStore = KeyStore.getInstance(KEYSTORE);
-
+            Provider provider = Security.getProvider("AndroidKeyStore");
+            if (provider == null) { LOGE("provider not found"); return; }
+            KeyStore keyStore = KeyStore.getInstance("AndroidKeyStore");
             Field f = keyStore.getClass().getDeclaredField("keyStoreSpi");
             f.setAccessible(true);
             CustomKeyStoreSpi.keyStoreSpi = (KeyStoreSpi) f.get(keyStore);
             f.setAccessible(false);
-
             CustomProvider customProvider = new CustomProvider(provider);
-            Security.removeProvider(KEYSTORE);
+            Security.removeProvider("AndroidKeyStore");
             Security.insertProviderAt(customProvider, 1);
-
-            LOG("Spoof KeyStoreSpi and Provider done!");
-
-        } catch (KeyStoreException e) {
-            LOG("Couldn't find KeyStore: " + e);
-        } catch (NoSuchFieldException e) {
-            LOG("Couldn't find field: " + e);
-        } catch (IllegalAccessException e) {
-            LOG("Couldn't change access of field: " + e);
+            LOGI("provider spoofed");
+        } catch (Exception e) {
+            LOGE("provider failed: " + e.getMessage());
         }
     }
 
     static void spoofDevice() {
-        for (String key : map.keySet()) {
-            setField(key, map.get(key));
+        LOGI("spoof " + map.size() + " fields");
+        for (Map.Entry<String, String> entry : map.entrySet()) {
+            setField(entry.getKey(), entry.getValue());
         }
     }
 
     private static void spoofPackageManager() {
+        LOGI("spoof signatures");
         Signature spoofedSignature = new Signature(Base64.decode(signatureData, Base64.DEFAULT));
-        Parcelable.Creator<PackageInfo> originalCreator = PackageInfo.CREATOR;
-        Parcelable.Creator<PackageInfo> customCreator = new CustomPackageInfoCreator(originalCreator, spoofedSignature);
-
+        Parcelable.Creator<PackageInfo> customCreator = new CustomPackageInfoCreator(PackageInfo.CREATOR, spoofedSignature);
         try {
             Field creatorField = findField(PackageInfo.class, "CREATOR");
             creatorField.setAccessible(true);
             creatorField.set(null, customCreator);
+            LOGI("creator replaced");
         } catch (Exception e) {
-            LOG("Couldn't replace PackageInfoCreator: " + e);
+            LOGE("creator failed: " + e.getMessage());
         }
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            HiddenApiBypass.addHiddenApiExemptions("Landroid/os/Parcel;", "Landroid/content/pm", "Landroid/app");
+            try {
+                HiddenApiBypass.addHiddenApiExemptions("Landroid/os/Parcel;", "Landroid/content/pm", "Landroid/app");
+                LOGI("hidden api ok");
+            } catch (Exception e) {
+                LOGE("hidden api failed: " + e.getMessage());
+            }
         }
+        clearCaches();
+    }
 
+    private static void clearCaches() {
         try {
             Field cacheField = findField(PackageManager.class, "sPackageInfoCache");
             cacheField.setAccessible(true);
             Object cache = cacheField.get(null);
-            Method clearMethod = cache.getClass().getMethod("clear");
-            clearMethod.invoke(cache);
+            if (cache != null) {
+                cache.getClass().getMethod("clear").invoke(cache);
+                LOGI("cache cleared");
+            }
         } catch (Exception e) {
-            LOG("Couldn't clear PackageInfoCache: " + e);
+            if (verboseLogs > 1) LOG("cache clear: " + e.getMessage());
         }
-
-        try {
-            Field creatorsField = findField(Parcel.class, "mCreators");
-            creatorsField.setAccessible(true);
-            Map<?, ?> mCreators = (Map<?, ?>) creatorsField.get(null);
-            mCreators.clear();
-        } catch (Exception e) {
-            LOG("Couldn't clear Parcel mCreators: " + e);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            clearParcelField("mCreators");
+            clearParcelField("sPairedCreators");
         }
+    }
 
+    private static void clearParcelField(String fieldName) {
         try {
-            Field creatorsField = findField(Parcel.class, "sPairedCreators");
+            Field creatorsField = findField(Parcel.class, fieldName);
             creatorsField.setAccessible(true);
-            Map<?, ?> sPairedCreators = (Map<?, ?>) creatorsField.get(null);
-            sPairedCreators.clear();
+            Map<?, ?> creators = (Map<?, ?>) creatorsField.get(null);
+            if (creators != null) {
+                creators.clear();
+                LOGI("parcel " + fieldName + " cleared");
+            }
         } catch (Exception e) {
-            LOG("Couldn't clear Parcel sPairedCreators: " + e);
+            if (verboseLogs > 1) LOG("parcel " + fieldName + ": " + e.getMessage());
         }
     }
 
     private static Field findField(Class<?> currentClass, String fieldName) throws NoSuchFieldException {
         while (currentClass != null && !currentClass.equals(Object.class)) {
-            try {
-                return currentClass.getDeclaredField(fieldName);
-            } catch (NoSuchFieldException e) {
-                currentClass = currentClass.getSuperclass();
-            }
+            try { return currentClass.getDeclaredField(fieldName); }
+            catch (NoSuchFieldException e) { currentClass = currentClass.getSuperclass(); }
         }
-        throw new NoSuchFieldException("Field '" + fieldName + "' not found in class hierarchy of " + currentClass.getName());
+        throw new NoSuchFieldException("Field '" + fieldName + "' not found");
     }
 
-    private static boolean classContainsField(Class className, String fieldName) {
+    private static boolean classContainsField(Class<?> className, String fieldName) {
         for (Field field : className.getDeclaredFields()) {
             if (field.getName().equals(fieldName)) return true;
         }
@@ -187,84 +189,80 @@ public final class EntryPoint {
     }
 
     private static void setField(String name, String value) {
-        if (value.isEmpty()) {
-            LOG(String.format("%s is empty, skipping", name));
+        if (value == null || value.isEmpty()) {
+            if (verboseLogs > 1) LOG(name + " empty skip");
             return;
         }
-
         Field field = null;
-        String oldValue = null;
-        Object newValue = null;
-
         try {
             if (classContainsField(Build.class, name)) {
                 field = Build.class.getDeclaredField(name);
             } else if (classContainsField(Build.VERSION.class, name)) {
                 field = Build.VERSION.class.getDeclaredField(name);
             } else {
-                if (verboseLogs > 1) LOG(String.format("Couldn't determine '%s' class name", name));
+                if (verboseLogs > 1) LOG(name + " class unknown");
                 return;
             }
         } catch (NoSuchFieldException e) {
-            LOG(String.format("Couldn't find '%s' field name: " + e, name));
+            LOGE(name + " not found: " + e.getMessage());
             return;
         }
         field.setAccessible(true);
-        try {
-            oldValue = String.valueOf(field.get(null));
-        } catch (IllegalAccessException e) {
-            LOG(String.format("Couldn't access '%s' field value: " + e, name));
+        String oldValue;
+        try { oldValue = String.valueOf(field.get(null)); }
+        catch (IllegalAccessException e) {
+            LOGE(name + " access: " + e.getMessage());
             return;
         }
         if (value.equals(oldValue)) {
-            if (verboseLogs > 2) LOG(String.format("[%s]: %s (unchanged)", name, value));
+            if (verboseLogs > 2) LOG(name + " " + value + " unchanged");
             return;
         }
         Class<?> fieldType = field.getType();
-        if (fieldType == String.class) {
-            newValue = value;
-        } else if (fieldType == int.class) {
-            newValue = Integer.parseInt(value);
-        } else if (fieldType == long.class) {
-            newValue = Long.parseLong(value);
-        } else if (fieldType == boolean.class) {
-            newValue = Boolean.parseBoolean(value);
-        } else {
-            LOG(String.format("Couldn't convert '%s' to '%s' type", value, fieldType));
-            return;
-        }
+        Object newValue;
         try {
+            if (fieldType == String.class) newValue = value;
+            else if (fieldType == int.class || fieldType == Integer.class) newValue = Integer.parseInt(value);
+            else if (fieldType == long.class || fieldType == Long.class) newValue = Long.parseLong(value);
+            else if (fieldType == boolean.class || fieldType == Boolean.class) newValue = Boolean.parseBoolean(value);
+            else {
+                LOGE(name + " type " + fieldType.getName() + " unsupported");
+                return;
+            }
             field.set(null, newValue);
+            LOG(name + " " + oldValue + " -> " + value);
+        } catch (NumberFormatException e) {
+            LOGE(name + " parse " + value + ": " + e.getMessage());
         } catch (IllegalAccessException e) {
-            LOG(String.format("Couldn't modify '%s' field value: " + e, name));
-            return;
+            LOGE(name + " set: " + e.getMessage());
         }
-        field.setAccessible(false);
-        LOG(String.format("[%s]: %s -> %s", name, oldValue, value));
     }
 
     private static String logParseField(Field field) {
         Object value = null;
         String type = field.getType().getName();
         String name = field.getName();
-        try {
-            value = field.get(null);
-        } catch (IllegalAccessException|NullPointerException e) {
-            return String.format("Couldn't access '%s' field value: " + e, name);
-        }
-        return String.format("<%s> %s: %s", type, name, String.valueOf(value));
+        try { value = field.get(null); }
+        catch (Exception e) { return name + " access: " + e.getMessage(); }
+        return type + " " + name + ": " + String.valueOf(value);
     }
 
     private static void logFields() {
+        LOGI("=== Build ===");
         for (Field field : Build.class.getDeclaredFields()) {
+            field.setAccessible(true);
             LOG("Build " + logParseField(field));
+            field.setAccessible(false);
         }
+        LOGI("=== Build.VERSION ===");
         for (Field field : Build.VERSION.class.getDeclaredFields()) {
+            field.setAccessible(true);
             LOG("Build.VERSION " + logParseField(field));
+            field.setAccessible(false);
         }
     }
 
-    static void LOG(String msg) {
-        Log.d("PIF/Java:DG", msg);
-    }
+    static void LOG(String msg) { if (verboseLogs > 0) Log.d(TAG, msg); }
+    static void LOGI(String msg) { if (verboseLogs > 0) Log.i(TAG, msg); }
+    static void LOGE(String msg) { if (verboseLogs > 0) Log.e(TAG, msg); }
 }

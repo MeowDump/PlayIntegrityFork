@@ -19,17 +19,20 @@ public class CustomPackageInfoCreator implements Parcelable.Creator<PackageInfo>
     @SuppressWarnings("deprecation")
     public PackageInfo createFromParcel(Parcel source) {
         PackageInfo packageInfo = originalCreator.createFromParcel(source);
-        if (packageInfo.packageName.equals("android")) {
-            if (packageInfo.signatures != null && packageInfo.signatures.length > 0) {
-                packageInfo.signatures[0] = spoofedSignature;
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                if (packageInfo.signingInfo != null) {
-                    Signature[] signaturesArray = packageInfo.signingInfo.getApkContentsSigners();
-                    if (signaturesArray != null && signaturesArray.length > 0) {
-                        signaturesArray[0] = spoofedSignature;
-                    }
+        if (!"android".equals(packageInfo.packageName)) return packageInfo;
+        if (packageInfo.signatures != null && packageInfo.signatures.length > 0) {
+            packageInfo.signatures[0] = spoofedSignature;
+            if (EntryPoint.getVerboseLogs() > 0) EntryPoint.LOG("legacy sig spoofed");
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && packageInfo.signingInfo != null) {
+            try {
+                Signature[] signaturesArray = packageInfo.signingInfo.getApkContentsSigners();
+                if (signaturesArray != null && signaturesArray.length > 0) {
+                    signaturesArray[0] = spoofedSignature;
+                    if (EntryPoint.getVerboseLogs() > 0) EntryPoint.LOG("signers spoofed");
                 }
+            } catch (Exception e) {
+                if (EntryPoint.getVerboseLogs() > 0) EntryPoint.LOGE("signingInfo: " + e.getMessage());
             }
         }
         return packageInfo;

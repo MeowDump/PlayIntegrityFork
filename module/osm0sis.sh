@@ -9,15 +9,7 @@
 #
 # Licensed under GNU GPL‑3.0 ~ see LICENSE file for details.
 
-# Enable verbose mode if requested
 [ "$VERBOSE_MODE" = 1 ] && set -x
-
-if [ "$USER" != "root" -a "$(whoami 2>/dev/null)" != "root" ]; then
-  echo "osm0sis: need root permissions"; exit 1;
-fi;
-case "$HOME" in
-  *termux*) echo "osm0sis: need su root environment"; exit 1;;
-esac;
 
 until [ -z "$1" ]; do
   case "$1" in
@@ -46,24 +38,20 @@ until [ -z "$1" ]; do
   esac
 done
 
-echo "Pixel Canary pif.prop generator script \
-  \n  by osm0sis @ xda-developers";
-
 case "$0" in
   *.sh) DIR="$0";;
   *) DIR="$(lsof -p $$ 2>/dev/null | grep -o '/.*osm0sis.sh$')";;
 esac;
 DIR=$(dirname "$(readlink -f "$DIR")");
 
-item() { echo "\n- $@"; }
 die() { echo "\nError: $@!"; exit 1; }
 die_bb() { die "$@, install busybox"; }
 warn() { echo "\nWarning: $@!"; }
 
 export_json_from_prop() {
-    [ "$SKIP_JSON" = 1 ] && return 0   # Skip JSON if -n provided
+    [ "$SKIP_JSON" = 1 ] && return 0
     FLAG_FILE="/data/adb/Box-Brain/json"
-    PROP_FILE="/data/adb/modules/playintegrityfix/custom.pif.prop"
+    PROP_FILE="/data/adb/modules/playintegrityfix/pixel.txt"
     OUT_JSON="/sdcard/meow.json"
 
     [ ! -f "$FLAG_FILE" ] && return 0
@@ -76,7 +64,6 @@ export_json_from_prop() {
     echo "{" > "$OUT_JSON"
 
     while IFS= read -r LINE; do
-        # Extract comments
         case "$LINE" in
             "# Released On:"*)
                 RELEASED_ON="${LINE#\# Released On: }"
@@ -86,34 +73,28 @@ export_json_from_prop() {
                 EXPIRY_DATE="${LINE#\# Estimated Expiry: }"
                 continue
                 ;;
-            ""|\#*) continue ;;  # Skip blank lines or other comments
+            ""|\#*) continue ;;
         esac
 
-        # Process key=value lines
         case "$LINE" in
             *=*)
                 KEY="${LINE%%=*}"
                 VALUE="${LINE#*=}"
 
-                # Remove leading '*.' or '*' if present
                 KEY="${KEY#\*.}"
                 KEY="${KEY#\*}"
 
-                # Map specific keys to uppercase
                 case "$KEY" in
                     build.id) KEY="BUILD.ID" ;;
                     security_patch) KEY="SECURITY_PATCH" ;;
                     api_level) KEY="API_LEVEL" ;;
                 esac
 
-                # Escape double quotes in value
                 VALUE="${VALUE//\"/\\\"}"
 
-                # Add comma if not first
                 [ "$FIRST" -eq 0 ] && echo "," >> "$OUT_JSON"
                 FIRST=0
 
-                # Append JSON key-value
                 printf '  "%s": "%s"' "$KEY" "$VALUE" >> "$OUT_JSON"
                 ;;
         esac
@@ -122,7 +103,6 @@ export_json_from_prop() {
     echo "" >> "$OUT_JSON"
     echo "}" >> "$OUT_JSON"
 
-    # Append comments at the end
     {
         [ -n "$RELEASED_ON" ] && echo "// Released On: $RELEASED_ON"
         [ -n "$EXPIRY_DATE" ] && echo "// Estimated Expiry: $EXPIRY_DATE"
@@ -176,13 +156,12 @@ if [ "$DIR" = /data/adb/modules/playintegrityfix ]; then
 fi;
 cd "$DIR";
 
-item "Crawling Android Developers for latest Pixel Beta device list ...";
-wget -q -O PIXEL_VERSIONS_HTML --no-check-certificate "https://developer.android.com/about/versions" 2>&1 || exit 1;
-wget -q -O PIXEL_LATEST_HTML --no-check-certificate "$(grep -o 'https://developer.android.com/about/versions/.*[0-9]"' PIXEL_VERSIONS_HTML | sort -ru | cut -d\" -f1 | head -n1 | tail -n1)" 2>&1 || exit 1;
-wget -q -O PIXEL_FI_HTML --no-check-certificate "https://developer.android.com$(grep -o 'href=".*download.*"' PIXEL_LATEST_HTML | grep 'qpr' | cut -d\" -f2 | head -n1 | tail -n1)" 2>&1 || exit 1;
+echo " ➤ Fetching Pixel Beta device list";
+wget -q -O PIXEL_VERSIONS_HTML --no-check-certificate "https://developer.android.com/about/versions" >/dev/null 2>&1 || exit 1;
+wget -q -O PIXEL_LATEST_HTML --no-check-certificate "$(grep -o 'https://developer.android.com/about/versions/.*[0-9]"' PIXEL_VERSIONS_HTML | sort -ru | cut -d\" -f1 | head -n1 | tail -n1)" >/dev/null 2>&1 || exit 1;
+wget -q -O PIXEL_FI_HTML --no-check-certificate "https://developer.android.com$(grep -o 'href=".*download.*"' PIXEL_LATEST_HTML | grep 'qpr' | cut -d\" -f2 | head -n1 | tail -n1)" >/dev/null 2>&1 || exit 1;
 MODEL_LIST="$(grep -A1 'tr id=' PIXEL_FI_HTML | grep 'td' | sed 's;.*<td>\(.*\)</td>;\1;')";
 PRODUCT_LIST="$(grep 'tr id=' PIXEL_FI_HTML | sed 's;.*<tr id="\(.*\)">;\1_beta;')";
-echo "$PRODUCT_LIST" | wc -w;
 
 if [ "$FORCE_MATCH" ]; then
   DEVICE="$(getprop ro.product.device)";
@@ -193,7 +172,7 @@ if [ "$FORCE_MATCH" ]; then
     ;;
   esac;
 fi;
-item "Selecting Pixel Beta device ...";
+echo " ➤ Selecting Pixel Beta device";
 if [ -z "$PRODUCT" ]; then
   set_random_beta() {
     local list_count="$(echo "$MODEL_LIST" | wc -l)";
@@ -207,16 +186,18 @@ if [ -z "$PRODUCT" ]; then
   }
   set_random_beta;
 fi;
-echo "$MODEL ($PRODUCT)";
+echo " ➤ Using: $MODEL ($PRODUCT)";
+echo " "
 
-item "Crawling Android Flash Tool for latest Pixel Canary build info ...";
-wget -q -O PIXEL_FLASH_HTML --no-check-certificate "https://flash.android.com/" 2>&1 || exit 1;
-wget -q -O PIXEL_STATION_JSON --header "Referer: https://flash.android.com" --no-check-certificate "https://content-flashstation-pa.googleapis.com/v1/builds?product=$PRODUCT&key=$(grep -o '<body data-client-config=.*' PIXEL_FLASH_HTML | cut -d\; -f2 | cut -d\& -f1)" 2>&1 || exit 1;
+echo " ➤ Fetching latest Pixel Canary build info";
+wget -q -O PIXEL_FLASH_HTML --no-check-certificate "https://flash.android.com/" >/dev/null 2>&1 || exit 1;
+wget -q -O PIXEL_STATION_JSON --header "Referer: https://flash.android.com" --no-check-certificate "https://content-flashstation-pa.googleapis.com/v1/builds?product=$PRODUCT&key=$(grep -o '<body data-client-config=.*' PIXEL_FLASH_HTML | cut -d\; -f2 | cut -d\& -f1)" >/dev/null 2>&1 || exit 1;
 tac PIXEL_STATION_JSON | grep -m1 -A13 '"canary": true' > PIXEL_CANARY_JSON;
 ID="$(grep 'releaseCandidateName' PIXEL_CANARY_JSON | cut -d\" -f4)";
 INCREMENTAL="$(grep 'buildId' PIXEL_CANARY_JSON | cut -d\" -f4)";
 [ -z "$ID" -o -z "$INCREMENTAL" ] && die "Failed to extract build info from JSON";
-echo "Android $(grep 'releaseTrackVersionName' PIXEL_CANARY_JSON | cut -d\" -f4)";
+echo " ➤ Found: Android $(grep 'releaseTrackVersionName' PIXEL_CANARY_JSON | cut -d\" -f4)";
+echo " "
 
 FI="$(grep 'factoryImageDownloadUrl' PIXEL_CANARY_JSON | cut -d\" -f4)";
 FI_HOST="$(echo "$FI" | sed 's;^.*://\(.*\)$;\1;' | cut -d/ -f1)";
@@ -234,21 +215,17 @@ fi;
 if [ -f PIXEL_ZIP_HEADERS ] && grep -q 'Last-Modified' PIXEL_ZIP_HEADERS; then
   CANARY_REL_DATE="$(date -D '%a, %d %b %Y %H:%M:%S %Z' -d "$(grep -o 'Last-Modified.*' PIXEL_ZIP_HEADERS | cut -d\  -f2-)" '+%Y-%m-%d')";
   CANARY_EXP_DATE="$(date -D '%s' -d "$(($(date -D '%Y-%m-%d' -d "$CANARY_REL_DATE" '+%s') + 60 * 60 * 24 * 7 * 6))" '+%Y-%m-%d')";
-  echo "Canary Released: $CANARY_REL_DATE \
-    \nEstimated Expiry: $CANARY_EXP_DATE";
+  echo " ➤ Canary Released: $CANARY_REL_DATE";
+  echo " ➤ Estimated Expiry: $CANARY_EXP_DATE";
 else
   warn "Failed to determine Release Date from HTTP headers";
   CANARY_REL_DATE="Unknown";
   CANARY_EXP_DATE="Unknown";
 fi;
+echo " "
 
-item "Crawling Pixel Update Bulletins for corresponding security patch level ...";
-CANARY_ID="$(grep '"id"' PIXEL_CANARY_JSON | sed -e 's;.*canary-\(.*\)".*;\1;' -e 's;^\(.\{4\}\);\1-;')";
-[ -z "$CANARY_ID" ] && die "Failed to extract build info from JSON";
-wget -q -O PIXEL_SECBULL_HTML --no-check-certificate "https://source.android.com/docs/security/bulletin/pixel" 2>&1 || exit 1;
-
-item "Dumping values to minimal pif.prop ...";
-cat <<EOF | tee pif.prop;
+echo " ➤ Building pixel config";
+cat <<EOF | tee pif.txt >/dev/null;
 MANUFACTURER=Google
 MODEL=$MODEL
 FINGERPRINT=google/$PRODUCT/$DEVICE:CANARY/$ID/$INCREMENTAL:user/release-keys
@@ -262,7 +239,7 @@ for MIGRATE in migrate.sh /data/adb/modules/playintegrityfix/migrate.sh; do
   [ -f "$MIGRATE" ] && break; 
 done;
 if [ -f "$MIGRATE" ]; then
-  for OLDPIF in /data/adb/modules/playintegrityfix/custom.pif.prop /data/adb/modules/playintegrityfix/custom.pif.json; do
+  for OLDPIF in /data/adb/modules/playintegrityfix/pixel.txt /data/adb/modules/playintegrityfix/custom.pif.json; do
     [ -f "$OLDPIF" ] && break;
   done;
   if [ -f "$OLDPIF" ]; then
@@ -272,52 +249,55 @@ if [ -f "$MIGRATE" ]; then
     FORCE_STRONG=1;
   fi;
   if [ "$FORCE_STRONG" ]; then
-    item "Forcing configuration for <A13 PI Strong ...";
+    echo " ➤ Forcing configuration for <A13 PI Strong";
     ARGS="-a"; PATCH_COMMENT=1; spoofProvider=0;
   else
-    item "Retaining existing configuration ...";
+    echo " ➤ Retaining existing configuration";
   fi;
+  echo " "
 
-  item "Converting pif.prop to custom.pif.prop with migrate.sh:";
-  rm -f pif.json custom.pif.json custom.pif.prop;
-  sh $MIGRATE -i $ARGS pif.prop;
+  echo " ➤ Generating pixel.txt";
+  rm -f pif.json custom.pif.json pixel.txt;
+  sh $MIGRATE -i $ARGS pif.txt >/dev/null 2>&1;
   if [ -n "$ARGS" ]; then
     grep_config() {
       if [ -f "$2" ]; then
         case $2 in
           *.json) grep -m1 "$1" $2 | cut -d\" -f4;;
-          *.prop) grep -m1 "$1=" "$2" | cut -d= -f2 | cut -d\# -f1 | sed 's/[[:space:]]*$//';;
+          *.txt) grep -m1 "$1=" "$2" | cut -d= -f2 | cut -d\# -f1 | sed 's/[[:space:]]*$//';;
         esac;
       fi;
     }
-    ADVSETTINGS="spoofBuild spoofProps spoofProvider spoofSignature spoofVendingFinger spoofVendingSdk spoofPixel";
+    ADVSETTINGS="verboseLogs spoofApps spoofBuild spoofProps spoofProvider spoofSignature spoofVendingFinger spoofVendingSdk spoofPixel";
     for SETTING in $ADVSETTINGS; do
       eval [ -z \"\$$SETTING\" ] \&\& $SETTING=$(grep_config "$SETTING" $OLDPIF);
       eval TMPVAL=\$$SETTING;
-      [ -n "$TMPVAL" ] && sed -i "s;\($SETTING=\).;\1$TMPVAL;" custom.pif.prop;
+      [ -n "$TMPVAL" ] && sed -i "s;\($SETTING=\).;\1$TMPVAL;" pixel.txt;
     done;
   fi;
-  [ "$PATCH_COMMENT" ] && sed -i 's;^#\*.security_patch;*.security_patch;' custom.pif.prop;
-  echo " " >> custom.pif.prop;
-  echo "# Released On: $CANARY_REL_DATE" >> custom.pif.prop;
-  echo "# Estimated Expiry: $CANARY_EXP_DATE" >> custom.pif.prop
-  cat custom.pif.prop;
+  [ "$PATCH_COMMENT" ] && sed -i 's;^#\*.security_patch;*.security_patch;' pixel.txt;
+  echo " " >> pixel.txt;
+  echo "# Released On: $CANARY_REL_DATE" >> pixel.txt;
+  echo "# Estimated Expiry: $CANARY_EXP_DATE" >> pixel.txt
+  cat pixel.txt >/dev/null 2>&1;
 fi;
 
 if [ "$DIR" = /data/adb/modules/playintegrityfix/osm0sis ]; then
   if [ -f /data/adb/modules/playintegrityfix/migrate.sh ]; then
-    NEWNAME="custom.pif.prop";
+    NEWNAME="pixel.txt";
   else
-    NEWNAME="pif.prop";
+    NEWNAME="pif.txt";
   fi;
   for OLDPIF in $NEWNAME custom.pif.json; do
     if [ -f "../$OLDPIF" ]; then
-      item "Renaming old file to $OLDPIF.bak ...";
-      mv -fv ../$OLDPIF ../$OLDPIF.bak;
+      echo " ➤ Backing-up current config";
+      mv -fv ../$OLDPIF ../$OLDPIF.bak >/dev/null 2>&1;
     fi;
   done;
-  item "Installing new prop ...";
-  cp -fv $NEWNAME ..;
+  echo " ➤ Installing new config";
+  cp -fv $NEWNAME .. >/dev/null 2>&1;
 fi;
 
-export_json_from_prop
+export_json_from_prop >/dev/null 2>&1
+echo " "
+echo " "

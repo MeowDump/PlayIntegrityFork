@@ -15,7 +15,7 @@ N="
 case "$1" in
 -h|--help|help) echo "sh migrate.sh [-f] [-o] [-a] [in-file] [out-file]"; exit 0;;
 -i|--install|install) INSTALL=1; shift;;
-*) echo "custom.pif.prop migration script \
+*) echo "pixel.txt migration script \
   $N  by osm0sis @ xda-developers $N";;
 esac;
 
@@ -60,16 +60,24 @@ fi;
 DIR=$(dirname "$(readlink -f "$DIR")");
 
 if [ -z "$FILE" ]; then
-[ -f "$DIR/custom.pif.prop" ] && FILE="$DIR/custom.pif.prop";
+[ -f "$DIR/pixel.txt" ] && FILE="$DIR/pixel.txt";
 fi;
 [ -f "$FILE" ] || die "No config file found";
 
 OUT="$2";
-[ -z "$OUT" ] && OUT="$DIR/custom.pif.prop";
+[ -z "$OUT" ] && OUT="$DIR/pixel.txt";
+
+# Preserve existing date comments from input file
+RELEASED_ON=""
+EXPIRY_DATE=""
+if [ -f "$FILE" ]; then
+    RELEASED_ON="$(grep -m1 '^# Released On:' "$FILE" | sed 's/^# Released On: //')"
+    EXPIRY_DATE="$(grep -m1 '^# Estimated Expiry:' "$FILE" | sed 's/^# Estimated Expiry: //')"
+fi
 
 grep_check_config api_level && [ ! "$FORCE" ] && die "No migration required";
 
-[ "$INSTALL" ] || item "Parsing fields ...";
+[ "$INSTALL" ] || item " ✦ Parsing fields ...";
 
 FPFIELDS="BRAND PRODUCT DEVICE RELEASE ID INCREMENTAL TYPE TAGS";
 ALLFIELDS="MANUFACTURER MODEL FINGERPRINT $FPFIELDS SECURITY_PATCH DEVICE_INITIAL_SDK_INT";
@@ -107,9 +115,9 @@ fi;
 
 if [ -z "$RELEASE" -o -z "$INCREMENTAL" -o -z "$TYPE" -o -z "$TAGS" -o "$OVERRIDE" ]; then
 if [ "$OVERRIDE" ]; then
-  item "Overriding values for fields derivable from FINGERPRINT ...";
+  item " ✦ Overriding values for fields derivable from FINGERPRINT ...";
 else
-  item "Missing default fields found, deriving from FINGERPRINT ...";
+  item " ✦ Missing default fields found, deriving from FINGERPRINT ...";
 fi;
 IFS='/:' read F1 F2 F3 F4 F5 F6 F7 F8 <<EOF
 $(grep_get_config FINGERPRINT)
@@ -134,7 +142,7 @@ fi;
 keep_advanced() {
 for SETTING in $ADVSETTINGS; do
   if grep_check_config "$SETTING" "$1"; then
-    item "Retaining existing configuration ...";
+    item " ✦ Retaining existing configuration ...";
     ADVANCED=1;
 
     for SETTING in $ADVSETTINGS; do
@@ -146,9 +154,11 @@ for SETTING in $ADVSETTINGS; do
 done;
 }
 
-ADVSETTINGS="spoofBuild spoofProps spoofProvider spoofSignature spoofVendingFinger spoofVendingSdk spoofPixel"
+ADVSETTINGS="verboseLogs spoofApps spoofBuild spoofProps spoofProvider spoofSignature spoofVendingFinger spoofVendingSdk spoofPixel"
 
 # Default advanced values
+verboseLogs=0
+spoofApps=0
 spoofBuild=1
 spoofProps=1
 spoofProvider=0
@@ -159,10 +169,10 @@ spoofPixel=0
 
 # Check if Google Wallet is installed
 if pm list packages | grep -q "com.google.android.apps.walletnfcrel"; then
-  item "com.google.android.apps.walletnfcrel is installed, setting spoofProvider to 0";
+  item " ✦ com.google.android.apps.walletnfcrel is installed, setting spoofProvider to 0";
   spoofProvider=0
 else
-  item "com.google.android.apps.walletnfcrel is not installed, keeping spoofProvider as 1";
+  item " ✦ com.google.android.apps.walletnfcrel is not installed, keeping spoofProvider as 1";
 fi
 
 PXL_FILE="/data/adb/Box-Brain/pixelify"
@@ -175,7 +185,7 @@ ADVANCED=0
 
 # Handle Wipe first
 if [ -f "$WIPE_FILE" ]; then
-  item "Wipe file exists, removing advanced properties ..."
+  item " ✦ Wipe file exists, removing advanced properties ..."
   ADVANCED=0
   for SETTING in $ADVSETTINGS; do
       unset $SETTING
@@ -184,7 +194,9 @@ if [ -f "$WIPE_FILE" ]; then
 
 # Pixelify mode
 elif [ -f "$PXL_FILE" ]; then
-  item "Applying pixelify profile values ...."
+  item " ✦ Applying pixelify profile values ...."
+  verboseLogs=0
+  spoofApps=0
   spoofBuild=1
   spoofProps=1
   spoofProvider=0
@@ -196,7 +208,9 @@ elif [ -f "$PXL_FILE" ]; then
 
 # Legacy mode
 elif [ -f "$LEGACY_FILE" ]; then
-  item "Applying legacy profile values ...."
+  item " ✦ Applying legacy profile values ...."
+  verboseLogs=0
+  spoofApps=0
   spoofBuild=1
   spoofProps=1
   spoofProvider=0
@@ -208,13 +222,13 @@ elif [ -f "$LEGACY_FILE" ]; then
 
 # Advanced mode
 elif [ -f "$ADV_FILE" ]; then
-  item "Applying supreme profile values ...."
+  item " ✦ Applying supreme profile values ...."
   ADVANCED=1
   keep_advanced "$FILE"
 
 # No control file
 else
-  item "No profile detected, using default advanced values ..."
+  item " ✦ No profile detected, using default advanced values ..."
   ADVANCED=1
 fi
 
@@ -223,20 +237,20 @@ SECURITY_COMMENT=
 if [ ! -f "$WIPE_FILE" ]; then
   if [ -f "$OUT" ]; then
       keep_advanced "$OUT";
-      item "Renaming old file to $(basename "$OUT").bak ...";
+      item " ✦ Renaming old file to $(basename "$OUT").bak ...";
       mv -f "$OUT" "$OUT.bak";
   else
       case "$FILE" in
-          *.prop) ;;
+          *.txt) ;;
           *) keep_advanced "$FILE";;
       esac;
   fi
 else
-  item "Meta mode: skipping Advanced Settings"
+  item " ✦ Meta mode: skipping Advanced Settings"
 fi
 
-[ "$INSTALL" ] || item "Writing fields and properties to updated custom.pif.prop ...";
-[ "$ADVANCED" ] && item "Adding Advanced Settings entries ...";
+[ "$INSTALL" ] || item " ✦ Writing fields and properties to updated pixel.txt ...";
+[ "$ADVANCED" ] && item " ✦ Adding Advanced Settings entries ...";
 
 CMNT='#'
 MID='='
@@ -261,6 +275,15 @@ if [ "$ADVANCED" ] && [ -n "$ADVSETTINGS" ]; then
         eval VAL=\$$SETTING
         [ -n "$VAL" ] && echo "$SETTING$MID$VAL"
     done
+fi
+
+# Append preserved date comments
+if [ -n "$RELEASED_ON" ]; then
+    echo
+    echo "# Released On: $RELEASED_ON"
+fi
+if [ -n "$EXPIRY_DATE" ]; then
+    echo "# Estimated Expiry: $EXPIRY_DATE"
 fi
 } > "$OUT"
 

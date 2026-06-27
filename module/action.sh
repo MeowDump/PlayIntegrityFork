@@ -6,12 +6,12 @@ if [ -n "$ASH_STANDALONE" ]; then
     unset ASH_STANDALONE
 fi
 
-sh $MODPATH/autopif4.sh -m || exit 1
+sh $MODPATH/osm0sis.sh -m || exit 1
 
 echo -e "\nDone!"
 
 # warn since KernelSU/APatch's implementation automatically closes if successful
 if [ "$KSU" = "true" -o "$APATCH" = "true" ] && [ "$KSU_NEXT" != "true" ] && [ "$WKSU" != "true" ] && [ "$MMRL" != "true" ]; then
-    echo -e "\nClosing dialog in 20 seconds ..."
+    echo -e "\nClosing dialog in 7 seconds ..."
     sleep 20
 fi

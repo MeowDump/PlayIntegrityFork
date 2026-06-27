@@ -26,6 +26,7 @@ static int spoofProvider = 1;
 static int spoofSignature = 0;
 static int spoofVendingFinger = 0;
 static int spoofVendingSdk = 0;
+static int spoofPixel = 0;
 
 static std::map<std::string, std::string> jsonProps;
 
@@ -41,10 +42,8 @@ static void modify_callback(void *cookie, const char *name, const char *value, u
     std::string prop(name);
 
     if (jsonProps.count(prop)) {
-        // Exact property match
         value = jsonProps[prop].c_str();
     } else {
-        // Leading * wildcard property match
         for (const auto &p: jsonProps) {
             if (p.first.starts_with("*") && prop.ends_with(p.first.substr(1))) {
                 value = p.second.c_str();
@@ -126,7 +125,6 @@ public:
         auto rawProcess = env->GetStringUTFChars(args->nice_name, nullptr);
         auto rawDir = env->GetStringUTFChars(args->app_data_dir, nullptr);
 
-        // Prevent crash on apps with no data dir
         if (rawDir == nullptr) {
             env->ReleaseStringUTFChars(args->nice_name, rawProcess);
             api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
@@ -147,7 +145,6 @@ public:
             return;
         }
 
-        // We are in GMS now, force unmount
         api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
 
         if (!isDroidGuardOrVending) {
@@ -240,10 +237,10 @@ public:
         readJson();
 
         if (pkgName == VENDING_PACKAGE) spoofBuild = spoofProps = spoofProvider = spoofSignature = 0;
-        else spoofVendingFinger = spoofVendingSdk = 0;
+        else spoofVendingFinger = spoofVendingSdk = spoofPixel = 0;
 
         if (spoofProps > 0) doHook();
-        if (spoofBuild + spoofProvider + spoofSignature + spoofVendingFinger + spoofVendingSdk > 0) inject();
+        if (spoofBuild + spoofProvider + spoofSignature + spoofVendingFinger + spoofVendingSdk + spoofPixel > 0) inject();
 
         dexVector.clear();
         json.clear();
@@ -260,11 +257,13 @@ private:
     nlohmann::json json;
     std::string pkgName;
     std::string vendingFingerprintValue;
+    std::string brandValue;
+    std::string deviceValue;
+    std::string modelValue;
 
     void readJson() {
         LOGD("JSON contains %d keys!", static_cast<int>(json.size()));
 
-        // Verbose logging level
         if (json.contains("verboseLogs")) {
             if (!json["verboseLogs"].is_null() && json["verboseLogs"].is_string() && json["verboseLogs"] != "") {
                 verboseLogs = stoi(json["verboseLogs"].get<std::string>());
@@ -275,7 +274,6 @@ private:
             json.erase("verboseLogs");
         }
 
-        // Vending advanced spoofing settings
         if (json.contains("spoofVendingSdk")) {
             if (!json["spoofVendingSdk"].is_null() && json["spoofVendingSdk"].is_string() && json["spoofVendingSdk"] != "") {
                 spoofVendingSdk = stoi(json["spoofVendingSdk"].get<std::string>());
@@ -285,6 +283,7 @@ private:
             }
             json.erase("spoofVendingSdk");
         }
+
         if (json.contains("spoofVendingFinger")) {
             if (!json["spoofVendingFinger"].is_null() && json["spoofVendingFinger"].is_string() && json["spoofVendingFinger"] != "") {
                 if (json["spoofVendingFinger"].get<std::string>().find_first_not_of("01") != std::string::npos) {
@@ -302,12 +301,32 @@ private:
             }
             json.erase("spoofVendingFinger");
         }
+
+        if (json.contains("spoofPixel")) {
+            if (!json["spoofPixel"].is_null() && json["spoofPixel"].is_string() && json["spoofPixel"] != "") {
+                spoofPixel = stoi(json["spoofPixel"].get<std::string>());
+                if (verboseLogs > 0) LOGD("Spoofing Pixel Fields in Play Store %s!", (spoofPixel > 0) ? "enabled" : "disabled");
+            } else {
+                LOGD("Error parsing spoofPixel!");
+            }
+            json.erase("spoofPixel");
+        }
+
+        if (json.contains("BRAND") && !json["BRAND"].is_null() && json["BRAND"].is_string() && json["BRAND"] != "") {
+            brandValue = json["BRAND"].get<std::string>();
+        }
+        if (json.contains("DEVICE") && !json["DEVICE"].is_null() && json["DEVICE"].is_string() && json["DEVICE"] != "") {
+            deviceValue = json["DEVICE"].get<std::string>();
+        }
+        if (json.contains("MODEL") && !json["MODEL"].is_null() && json["MODEL"].is_string() && json["MODEL"] != "") {
+            modelValue = json["MODEL"].get<std::string>();
+        }
+
         if (pkgName == VENDING_PACKAGE) {
             json.clear();
             return;
         }
 
-        // DroidGuard advanced spoofing settings
         if (json.contains("spoofBuild")) {
             if (!json["spoofBuild"].is_null() && json["spoofBuild"].is_string() && json["spoofBuild"] != "") {
                 spoofBuild = stoi(json["spoofBuild"].get<std::string>());
@@ -349,7 +368,6 @@ private:
         for (auto &jsonList: json.items()) {
             if (verboseLogs > 1) LOGD("Parsing %s", jsonList.key().c_str());
             if (jsonList.key().find_first_of("*.") != std::string::npos) {
-                // Name contains . or * (wildcard) so assume real property name
                 if (!jsonList.value().is_null() && jsonList.value().is_string()) {
                     if (jsonList.value() == "") {
                         LOGD("%s is empty, skipping", jsonList.key().c_str());
@@ -363,7 +381,6 @@ private:
                 eraseKeys.push_back(jsonList.key());
             }
         }
-        // Remove properties from parsed JSON
         for (auto key: eraseKeys) {
             if (json.contains(key)) json.erase(key);
         }
@@ -398,10 +415,16 @@ private:
 
         if (pkgName == VENDING_PACKAGE) {
             LOGD("JNI %s: Calling EntryPointVending.init", niceName);
-            auto entryInit = env->GetStaticMethodID(entryClass, "init", "(IIILjava/lang/String;)V");
+            auto entryInit = env->GetStaticMethodID(entryClass, "init", "(IIILjava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
             auto javaStr = env->NewStringUTF(vendingFingerprintValue.c_str());
-            env->CallStaticVoidMethod(entryClass, entryInit, verboseLogs, spoofVendingFinger, spoofVendingSdk, javaStr);
+            auto brandStr = env->NewStringUTF(brandValue.c_str());
+            auto deviceStr = env->NewStringUTF(deviceValue.c_str());
+            auto modelStr = env->NewStringUTF(modelValue.c_str());
+            env->CallStaticVoidMethod(entryClass, entryInit, verboseLogs, spoofVendingFinger, spoofVendingSdk, javaStr, spoofPixel, brandStr, deviceStr, modelStr);
             env->DeleteLocalRef(javaStr);
+            env->DeleteLocalRef(brandStr);
+            env->DeleteLocalRef(deviceStr);
+            env->DeleteLocalRef(modelStr);
         } else {
             LOGD("JNI %s: Sending JSON", niceName);
             auto receiveJson = env->GetStaticMethodID(entryClass, "receiveJson", "(Ljava/lang/String;)V");

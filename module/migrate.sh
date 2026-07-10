@@ -131,7 +131,7 @@ fi;
 
 if [ -z "$SECURITY_PATCH" -o "$SECURITY_PATCH" = "null" ]; then
 item 'Missing SECURITY_PATCH value found, setting default ...';
-SECURITY_PATCH="2026-06-01"
+SECURITY_PATCH="2026-07-01"
 fi;
 
 if [ -z "$DEVICE_INITIAL_SDK_INT" -o "$DEVICE_INITIAL_SDK_INT" = "null" ]; then

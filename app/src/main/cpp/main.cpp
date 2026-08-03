@@ -16,6 +16,8 @@
 #define JSON_FILE_PATH "/data/adb/modules/playintegrityfix/pif.json"
 #define CUSTOM_JSON_FILE_PATH "/data/adb/modules/playintegrityfix/custom.pif.json"
 
+#define APPS_FILE_PATH "/data/adb/modules/playintegrityfix/apps.txt"
+
 #define VENDING_PACKAGE "com.android.vending"
 #define DROIDGUARD_PACKAGE "com.google.android.gms.unstable"
 
@@ -27,6 +29,7 @@ static int spoofSignature = 0;
 static int spoofVendingFinger = 0;
 static int spoofVendingSdk = 0;
 static int spoofPixel = 0;
+static int spoofApps = 0;
 
 static std::map<std::string, std::string> jsonProps;
 
@@ -80,6 +83,27 @@ static void doHook() {
     LOGD("Found '__system_property_read_callback' handle at %p", handle);
     DobbyHook(handle, reinterpret_cast<dobby_dummy_func_t>(my_system_property_read_callback),
         reinterpret_cast<dobby_dummy_func_t *>(&o_system_property_read_callback));
+}
+
+// Checks apps.txt for an exact match against the given package/process name
+static bool isPackageInAppsList(const std::string &pkgName) {
+    FILE *appsFile = fopen(APPS_FILE_PATH, "r");
+    if (!appsFile) return false;
+
+    bool found = false;
+    char line[256];
+    while (fgets(line, sizeof(line), appsFile)) {
+        size_t len = strlen(line);
+        if (len > 0 && line[len - 1] == '\n') line[len - 1] = '\0';
+        len = strlen(line);
+        if (len > 0 && line[len - 1] == '\r') line[len - 1] = '\0';
+        if (strlen(line) > 0 && pkgName == line) {
+            found = true;
+            break;
+        }
+    }
+    fclose(appsFile);
+    return found;
 }
 
 static void setFieldNative(JNIEnv *env, jclass /* clazz_EntryPoint */, jclass targetClass, jobject fieldObj, jstring typeObj, jobject valueObj) {
@@ -140,14 +164,17 @@ public:
         env->ReleaseStringUTFChars(args->nice_name, rawProcess);
         env->ReleaseStringUTFChars(args->app_data_dir, rawDir);
 
-        if (!isGms) {
+        // Determine per-app spoofing target before deciding whether to unload the module
+        isTargetApp = isPackageInAppsList(pkgName);
+
+        if (!isGms && !isTargetApp) {
             api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
             return;
         }
 
         api->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
 
-        if (!isDroidGuardOrVending) {
+        if (!isDroidGuardOrVending && !isTargetApp) {
             api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
             return;
         }
@@ -239,8 +266,14 @@ public:
         if (pkgName == VENDING_PACKAGE) spoofBuild = spoofProps = spoofProvider = spoofSignature = 0;
         else spoofVendingFinger = spoofVendingSdk = spoofPixel = 0;
 
-        if (spoofProps > 0) doHook();
-        if (spoofBuild + spoofProvider + spoofSignature + spoofVendingFinger + spoofVendingSdk + spoofPixel > 0) inject();
+        bool isGmsOrDroidGuardOrVending = pkgName == DROIDGUARD_PACKAGE || pkgName == VENDING_PACKAGE;
+
+        if (isTargetApp && spoofApps > 0) {
+            injectApps();
+        } else if (isGmsOrDroidGuardOrVending) {
+            if (spoofProps > 0) doHook();
+            if (spoofBuild + spoofProvider + spoofSignature + spoofVendingFinger + spoofVendingSdk + spoofPixel > 0) inject();
+        }
 
         dexVector.clear();
         json.clear();
@@ -260,6 +293,7 @@ private:
     std::string brandValue;
     std::string deviceValue;
     std::string modelValue;
+    bool isTargetApp = false;
 
     void readJson() {
         LOGD("JSON contains %d keys!", static_cast<int>(json.size()));
@@ -310,6 +344,16 @@ private:
                 LOGD("Error parsing spoofPixel!");
             }
             json.erase("spoofPixel");
+        }
+
+        if (json.contains("spoofApps")) {
+            if (!json["spoofApps"].is_null() && json["spoofApps"].is_string() && json["spoofApps"] != "") {
+                spoofApps = stoi(json["spoofApps"].get<std::string>());
+                if (verboseLogs > 0) LOGD("Per-app spoofing %s!", (spoofApps > 0) ? "enabled" : "disabled");
+            } else {
+                LOGD("Error parsing spoofApps!");
+            }
+            json.erase("spoofApps");
         }
 
         if (json.contains("BRAND") && !json["BRAND"].is_null() && json["BRAND"].is_string() && json["BRAND"] != "") {
@@ -406,6 +450,29 @@ private:
         auto entryClassName = env->NewStringUTF(className);
         auto entryClassObj = env->CallObjectMethod(dexCl, loadClass, entryClassName);
 
+        // Check and bail out cleanly
+        if (env->ExceptionCheck()) {
+            LOGD("JNI %s: Exception while loading class '%s', clearing and aborting injection", niceName, className);
+            env->ExceptionClear();
+            env->DeleteLocalRef(clClass);
+            env->DeleteLocalRef(systemClassLoader);
+            env->DeleteLocalRef(dexClClass);
+            env->DeleteLocalRef(buffer);
+            env->DeleteLocalRef(dexCl);
+            env->DeleteLocalRef(entryClassName);
+            return;
+        }
+        if (entryClassObj == nullptr) {
+            LOGD("JNI %s: loadClass('%s') returned null, aborting injection", niceName, className);
+            env->DeleteLocalRef(clClass);
+            env->DeleteLocalRef(systemClassLoader);
+            env->DeleteLocalRef(dexClClass);
+            env->DeleteLocalRef(buffer);
+            env->DeleteLocalRef(dexCl);
+            env->DeleteLocalRef(entryClassName);
+            return;
+        }
+
         auto entryClass = (jclass) entryClassObj;
 
         JNINativeMethod methods[] = {
@@ -436,6 +503,67 @@ private:
             env->CallStaticVoidMethod(entryClass, entryInit, verboseLogs, spoofBuild, spoofProvider, spoofSignature);
             env->DeleteLocalRef(javaStr);
         }
+        env->DeleteLocalRef(clClass);
+        env->DeleteLocalRef(systemClassLoader);
+        env->DeleteLocalRef(dexClClass);
+        env->DeleteLocalRef(buffer);
+        env->DeleteLocalRef(dexCl);
+        env->DeleteLocalRef(entryClassName);
+        env->DeleteLocalRef(entryClassObj);
+    }
+
+    void injectApps() {
+        LOGD("JNI APPS: Getting system classloader");
+        auto clClass = env->FindClass("java/lang/ClassLoader");
+        auto getSystemClassLoader = env->GetStaticMethodID(clClass, "getSystemClassLoader", "()Ljava/lang/ClassLoader;");
+        auto systemClassLoader = env->CallStaticObjectMethod(clClass, getSystemClassLoader);
+
+        LOGD("JNI APPS: Creating module classloader");
+        auto dexClClass = env->FindClass("dalvik/system/InMemoryDexClassLoader");
+        auto dexClInit = env->GetMethodID(dexClClass, "<init>", "(Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;)V");
+        auto buffer = env->NewDirectByteBuffer(dexVector.data(), static_cast<jlong>(dexVector.size()));
+        auto dexCl = env->NewObject(dexClClass, dexClInit, buffer, systemClassLoader);
+
+        LOGD("JNI APPS: Loading module class");
+        auto loadClass = env->GetMethodID(clClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+        auto entryClassName = env->NewStringUTF("es.chiteroman.playintegrityfix.EntryPointApps");
+        auto entryClassObj = env->CallObjectMethod(dexCl, loadClass, entryClassName);
+
+        if (env->ExceptionCheck()) {
+            LOGD("JNI APPS: Exception while loading EntryPointApps, clearing and aborting injection");
+            env->ExceptionClear();
+            env->DeleteLocalRef(clClass);
+            env->DeleteLocalRef(systemClassLoader);
+            env->DeleteLocalRef(dexClClass);
+            env->DeleteLocalRef(buffer);
+            env->DeleteLocalRef(dexCl);
+            env->DeleteLocalRef(entryClassName);
+            return;
+        }
+        if (entryClassObj == nullptr) {
+            LOGD("JNI APPS: loadClass('EntryPointApps') returned null, aborting injection");
+            env->DeleteLocalRef(clClass);
+            env->DeleteLocalRef(systemClassLoader);
+            env->DeleteLocalRef(dexClClass);
+            env->DeleteLocalRef(buffer);
+            env->DeleteLocalRef(dexCl);
+            env->DeleteLocalRef(entryClassName);
+            return;
+        }
+
+        auto entryClass = (jclass) entryClassObj;
+
+        JNINativeMethod methods[] = {
+            {"setFieldNative", "(Ljava/lang/Class;Ljava/lang/reflect/Field;Ljava/lang/String;Ljava/lang/Object;)V", (void*) setFieldNative}
+        };
+        env->RegisterNatives(entryClass, methods, 1);
+
+        LOGD("JNI APPS: Calling EntryPointApps.init");
+        auto entryInit = env->GetStaticMethodID(entryClass, "init", "(ILjava/lang/String;)V");
+        auto javaStr = env->NewStringUTF(json.dump().c_str());
+        env->CallStaticVoidMethod(entryClass, entryInit, verboseLogs, javaStr);
+        env->DeleteLocalRef(javaStr);
+
         env->DeleteLocalRef(clClass);
         env->DeleteLocalRef(systemClassLoader);
         env->DeleteLocalRef(dexClClass);

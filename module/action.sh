@@ -6,7 +6,7 @@ if [ -n "$ASH_STANDALONE" ]; then
     unset ASH_STANDALONE
 fi
 
-sh $MODPATH/osm0sis.sh -m || exit 1
+sh $MODPATH/osm0sis.sh || exit 1
 
 echo -e "\nDone!"
 

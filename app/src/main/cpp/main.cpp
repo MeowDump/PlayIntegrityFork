@@ -1,6 +1,7 @@
 #include <android/log.h>
 #include <sys/system_properties.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include "zygisk.hpp"
 #include "json/single_include/nlohmann/json.hpp"
@@ -17,6 +18,8 @@
 #define CUSTOM_JSON_FILE_PATH "/data/adb/modules/playintegrityfix/custom.pif.json"
 
 #define APPS_FILE_PATH "/data/adb/modules/playintegrityfix/apps.txt"
+
+#define STOP_FILE "/data/adb/modules/playintegrityfix/stop"
 
 #define VENDING_PACKAGE "com.android.vending"
 #define DROIDGUARD_PACKAGE "com.google.android.gms.unstable"
@@ -47,7 +50,7 @@ static void modify_callback(void *cookie, const char *name, const char *value, u
     if (jsonProps.count(prop)) {
         value = jsonProps[prop].c_str();
     } else {
-        for (const auto &p: jsonProps) {
+        for (const auto &p : jsonProps) {
             if (p.first.starts_with("*") && prop.ends_with(p.first.substr(1))) {
                 value = p.second.c_str();
                 break;
@@ -70,6 +73,7 @@ static void my_system_property_read_callback(const prop_info *pi, T_Callback cal
     if (pi == nullptr || callback == nullptr || cookie == nullptr) {
         return o_system_property_read_callback(pi, callback, cookie);
     }
+
     callbacks[cookie] = callback;
     return o_system_property_read_callback(pi, modify_callback, cookie);
 }
@@ -84,6 +88,7 @@ static void doHook() {
     shadowhook_init(SHADOWHOOK_MODE_UNIQUE, false);
 
     void *sym_addr = dlsym(RTLD_DEFAULT, "__system_property_read_callback");
+
     if (sym_addr == nullptr) {
         LOGD("Couldn't find '__system_property_read_callback' via dlsym");
         return;
@@ -99,34 +104,56 @@ static void doHook() {
         LOGD("Couldn't hook '__system_property_read_callback'. Error: %d", shadowhook_get_errno());
         return;
     }
+
     LOGD("Found '__system_property_read_callback' handle at %p", handle);
 }
 
-// Checks apps.txt for an exact match against the given package/process name
 static bool isPackageInAppsList(const std::string &pkgName) {
     FILE *appsFile = fopen(APPS_FILE_PATH, "r");
+
     if (!appsFile) return false;
 
     bool found = false;
     char line[256];
+
     while (fgets(line, sizeof(line), appsFile)) {
         size_t len = strlen(line);
-        if (len > 0 && line[len - 1] == '\n') line[len - 1] = '\0';
+
+        if (len > 0 && line[len - 1] == '\n')
+            line[len - 1] = '\0';
+
         len = strlen(line);
-        if (len > 0 && line[len - 1] == '\r') line[len - 1] = '\0';
+
+        if (len > 0 && line[len - 1] == '\r')
+            line[len - 1] = '\0';
+
         if (strlen(line) > 0 && pkgName == line) {
             found = true;
             break;
         }
     }
+
     fclose(appsFile);
     return found;
 }
 
-static void setFieldNative(JNIEnv *env, jclass /* clazz_EntryPoint */, jclass targetClass, jobject fieldObj, jstring typeObj, jobject valueObj) {
+static bool isPaused() {
+    struct stat st {};
+    return stat(STOP_FILE, &st) == 0;
+}
+
+static void setFieldNative(
+        JNIEnv *env,
+        jclass /* clazz_EntryPoint */,
+        jclass targetClass,
+        jobject fieldObj,
+        jstring typeObj,
+        jobject valueObj) {
+
     if (!targetClass || !fieldObj || !typeObj) return;
 
     jfieldID fieldID = env->FromReflectedField(fieldObj);
+
     if (!fieldID) return;
 
     const char *typeName = env->GetStringUTFChars(typeObj, nullptr);
@@ -161,13 +188,16 @@ public:
     }
 
     void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
-        bool isGms = false, isDroidGuardOrVending = false;
+        bool isGms = false;
+        bool isDroidGuardOrVending = false;
 
         auto rawProcess = env->GetStringUTFChars(args->nice_name, nullptr);
         auto rawDir = env->GetStringUTFChars(args->app_data_dir, nullptr);
 
         if (rawDir == nullptr) {
-            env->ReleaseStringUTFChars(args->nice_name, rawProcess);
+            if (rawProcess != nullptr)
+                env->ReleaseStringUTFChars(args->nice_name, rawProcess);
+
             api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
             return;
         }
@@ -175,8 +205,13 @@ public:
         pkgName = rawProcess;
         std::string_view dir(rawDir);
 
-        isGms = dir.ends_with("/com.google.android.gms") || dir.ends_with("/com.android.vending");
-        isDroidGuardOrVending = pkgName == DROIDGUARD_PACKAGE || pkgName == VENDING_PACKAGE;
+        isGms =
+                dir.ends_with("/com.google.android.gms") ||
+                dir.ends_with("/com.android.vending");
+
+        isDroidGuardOrVending =
+                pkgName == DROIDGUARD_PACKAGE ||
+                pkgName == VENDING_PACKAGE;
 
         env->ReleaseStringUTFChars(args->nice_name, rawProcess);
         env->ReleaseStringUTFChars(args->app_data_dir, rawDir);
@@ -196,13 +231,31 @@ public:
             return;
         }
 
+        if (isDroidGuardOrVending && isPaused()) {
+            LOGD("ZYGISK: Injection is paused by user, skipping Integrity-Box spoofing for %s", pkgName.c_str());
+            api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
+            return;
+        }
+
         std::vector<char> configVector;
-        long dexSize = 0, configSize = 0;
+        long dexSize = 0;
+        long configSize = 0;
 
         int fd = api->connectCompanion();
 
-        read(fd, &dexSize, sizeof(long));
-        read(fd, &configSize, sizeof(long));
+        if (fd < 0) {
+            LOGD("Couldn't connect to companion");
+            api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
+            return;
+        }
+
+        if (read(fd, &dexSize, sizeof(long)) != sizeof(long) ||
+            read(fd, &configSize, sizeof(long)) != sizeof(long)) {
+            close(fd);
+            LOGD("Couldn't read companion sizes");
+            api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
+            return;
+        }
 
         if (dexSize < 1) {
             close(fd);
@@ -222,10 +275,25 @@ public:
         LOGD("Read from file descriptor for 'config' -> %ld bytes", configSize);
 
         dexVector.resize(dexSize);
-        read(fd, dexVector.data(), dexSize);
+
+        if (read(fd, dexVector.data(), dexSize) != dexSize) {
+            close(fd);
+            LOGD("Couldn't read dex payload");
+            dexVector.clear();
+            api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
+            return;
+        }
 
         configVector.resize(configSize);
-        read(fd, configVector.data(), configSize);
+
+        if (read(fd, configVector.data(), configSize) != configSize) {
+            close(fd);
+            LOGD("Couldn't read config payload");
+            dexVector.clear();
+            configVector.clear();
+            api->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
+            return;
+        }
 
         close(fd);
 
@@ -234,18 +302,31 @@ public:
         if (!nlohmann::json::accept(configString, true)) {
             LOGD("Converting config from prop format to JSON format");
 
-            configString.erase(std::remove(configString.begin(), configString.end(), '\r'), configString.end());
+            configString.erase(
+                    std::remove(configString.begin(), configString.end(), '\r'),
+                    configString.end()
+            );
 
             std::string jsonString = "{";
+
             char propDelimiter = '=';
             char commentDelimiter = '#';
-            size_t beginPos = 0, endPos = 0;
+
+            size_t beginPos = 0;
+            size_t endPos = 0;
+
             while ((endPos = configString.find('\n', beginPos)) != std::string::npos) {
                 std::string line = configString.substr(beginPos, endPos - beginPos);
                 beginPos = endPos + 1;
-                if (line.empty() || line[0] == '#') continue;
-                std::string name, value;
+
+                if (line.empty() || line[0] == '#')
+                    continue;
+
+                std::string name;
+                std::string value;
+
                 size_t propDelimiterPos = line.find(propDelimiter);
+
                 if (propDelimiterPos != std::string::npos) {
                     name = line.substr(0, propDelimiterPos);
                     value = line.substr(propDelimiterPos + 1);
@@ -253,19 +334,27 @@ public:
                     LOGD("Invalid prop entry, skipping");
                     continue;
                 }
+
                 size_t commentDelimiterPos = value.find(commentDelimiter);
+
                 if (commentDelimiterPos != std::string::npos) {
                     value = value.substr(0, commentDelimiterPos);
+
                     size_t lastPos = value.find_last_not_of(" ");
-                    if (lastPos != std::string::npos) value.resize(lastPos + 1);
+
+                    if (lastPos != std::string::npos)
+                        value.resize(lastPos + 1);
                 }
+
                 jsonString += "\n\"" + name + "\": \"" + value + "\",";
             }
-            if (jsonString.back() == ',') jsonString.pop_back();
+
+            if (!jsonString.empty() && jsonString.back() == ',')
+                jsonString.pop_back();
+
             jsonString += "\n}\n";
 
             configString = jsonString;
-
             jsonString.clear();
         }
 
@@ -276,20 +365,44 @@ public:
     }
 
     void postAppSpecialize(const zygisk::AppSpecializeArgs *args) override {
-        if (dexVector.empty() || json.empty()) return;
+        if (dexVector.empty() || json.empty())
+            return;
 
         readJson();
 
-        if (pkgName == VENDING_PACKAGE) spoofBuild = spoofProps = spoofProvider = spoofSignature = 0;
-        else spoofVendingFinger = spoofVendingSdk = spoofPixel = 0;
+        if (pkgName == VENDING_PACKAGE)
+            spoofBuild = spoofProps = spoofProvider = spoofSignature = 0;
+        else
+            spoofVendingFinger = spoofVendingSdk = spoofPixel = 0;
 
-        bool isGmsOrDroidGuardOrVending = pkgName == DROIDGUARD_PACKAGE || pkgName == VENDING_PACKAGE;
+        bool isDroidGuardOrVending =
+                pkgName == DROIDGUARD_PACKAGE ||
+                pkgName == VENDING_PACKAGE;
 
         if (isTargetApp && spoofApps > 0) {
             injectApps();
-        } else if (isGmsOrDroidGuardOrVending) {
-            if (spoofProps > 0) doHook();
-            if (spoofBuild + spoofProvider + spoofSignature + spoofVendingFinger + spoofVendingSdk + spoofPixel > 0) inject();
+        } else if (isDroidGuardOrVending) {
+            if (isPaused()) {
+                LOGD("Paused: stop flag exists, skipping injection for %s", pkgName.c_str());
+
+                dexVector.clear();
+                json.clear();
+                return;
+            }
+
+            LOGD("Resume state: Continuing injection for %s", pkgName.c_str());
+
+            if (spoofProps > 0)
+                doHook();
+
+            if (spoofBuild +
+                spoofProvider +
+                spoofSignature +
+                spoofVendingFinger +
+                spoofVendingSdk +
+                spoofPixel > 0) {
+                inject();
+            }
         }
 
         dexVector.clear();
@@ -303,83 +416,153 @@ public:
 private:
     zygisk::Api *api = nullptr;
     JNIEnv *env = nullptr;
+
     std::vector<char> dexVector;
     nlohmann::json json;
+
     std::string pkgName;
     std::string vendingFingerprintValue;
     std::string brandValue;
     std::string deviceValue;
     std::string modelValue;
+
     bool isTargetApp = false;
 
     void readJson() {
         LOGD("JSON contains %d keys!", static_cast<int>(json.size()));
 
         if (json.contains("verboseLogs")) {
-            if (!json["verboseLogs"].is_null() && json["verboseLogs"].is_string() && json["verboseLogs"] != "") {
+            if (!json["verboseLogs"].is_null() &&
+                json["verboseLogs"].is_string() &&
+                json["verboseLogs"] != "") {
+
                 verboseLogs = stoi(json["verboseLogs"].get<std::string>());
-                if (verboseLogs > 0) LOGD("Verbose logging (level %d) enabled!", verboseLogs);
+
+                if (verboseLogs > 0)
+                    LOGD("Verbose logging (level %d) enabled!", verboseLogs);
             } else {
                 LOGD("Error parsing verboseLogs!");
             }
+
             json.erase("verboseLogs");
         }
 
         if (json.contains("spoofVendingSdk")) {
-            if (!json["spoofVendingSdk"].is_null() && json["spoofVendingSdk"].is_string() && json["spoofVendingSdk"] != "") {
+            if (!json["spoofVendingSdk"].is_null() &&
+                json["spoofVendingSdk"].is_string() &&
+                json["spoofVendingSdk"] != "") {
+
                 spoofVendingSdk = stoi(json["spoofVendingSdk"].get<std::string>());
-                if (verboseLogs > 0) LOGD("Spoofing SDK Level in Play Store %s!", (spoofVendingSdk > 0) ? "enabled" : "disabled");
+
+                if (verboseLogs > 0)
+                    LOGD(
+                            "Spoofing SDK Level in Play Store %s!",
+                            (spoofVendingSdk > 0) ? "enabled" : "disabled"
+                    );
             } else {
                 LOGD("Error parsing spoofVendingSdk!");
             }
+
             json.erase("spoofVendingSdk");
         }
 
         if (json.contains("spoofVendingFinger")) {
-            if (!json["spoofVendingFinger"].is_null() && json["spoofVendingFinger"].is_string() && json["spoofVendingFinger"] != "") {
-                if (json["spoofVendingFinger"].get<std::string>().find_first_not_of("01") != std::string::npos) {
+            if (!json["spoofVendingFinger"].is_null() &&
+                json["spoofVendingFinger"].is_string() &&
+                json["spoofVendingFinger"] != "") {
+
+                if (json["spoofVendingFinger"].get<std::string>().find_first_not_of("01") !=
+                    std::string::npos) {
+
                     spoofVendingFinger = 1;
-                    vendingFingerprintValue = json["spoofVendingFinger"].get<std::string>();
-                } else if (json.contains("FINGERPRINT") && !json["FINGERPRINT"].is_null() && json["FINGERPRINT"].is_string() && json["FINGERPRINT"] != "") {
-                    spoofVendingFinger = stoi(json["spoofVendingFinger"].get<std::string>());
-                    vendingFingerprintValue = json["FINGERPRINT"].get<std::string>();
+                    vendingFingerprintValue =
+                            json["spoofVendingFinger"].get<std::string>();
+
+                } else if (json.contains("FINGERPRINT") &&
+                           !json["FINGERPRINT"].is_null() &&
+                           json["FINGERPRINT"].is_string() &&
+                           json["FINGERPRINT"] != "") {
+
+                    spoofVendingFinger =
+                            stoi(json["spoofVendingFinger"].get<std::string>());
+
+                    vendingFingerprintValue =
+                            json["FINGERPRINT"].get<std::string>();
                 } else {
                     LOGD("Error parsing spoofVendingFinger or FINGERPRINT field!");
                 }
-                if (verboseLogs > 0) LOGD("Spoofing Fingerprint in Play Store %s!", (spoofVendingFinger > 0) ? "enabled" : "disabled");
+
+                if (verboseLogs > 0)
+                    LOGD(
+                            "Spoofing Fingerprint in Play Store %s!",
+                            (spoofVendingFinger > 0) ? "enabled" : "disabled"
+                    );
             } else {
                 LOGD("Error parsing spoofVendingFinger!");
             }
+
             json.erase("spoofVendingFinger");
         }
 
         if (json.contains("spoofPixel")) {
-            if (!json["spoofPixel"].is_null() && json["spoofPixel"].is_string() && json["spoofPixel"] != "") {
+            if (!json["spoofPixel"].is_null() &&
+                json["spoofPixel"].is_string() &&
+                json["spoofPixel"] != "") {
+
                 spoofPixel = stoi(json["spoofPixel"].get<std::string>());
-                if (verboseLogs > 0) LOGD("Spoofing Pixel Fields in Play Store %s!", (spoofPixel > 0) ? "enabled" : "disabled");
+
+                if (verboseLogs > 0)
+                    LOGD(
+                            "Spoofing Pixel Fields in Play Store %s!",
+                            (spoofPixel > 0) ? "enabled" : "disabled"
+                    );
             } else {
                 LOGD("Error parsing spoofPixel!");
             }
+
             json.erase("spoofPixel");
         }
 
         if (json.contains("spoofApps")) {
-            if (!json["spoofApps"].is_null() && json["spoofApps"].is_string() && json["spoofApps"] != "") {
+            if (!json["spoofApps"].is_null() &&
+                json["spoofApps"].is_string() &&
+                json["spoofApps"] != "") {
+
                 spoofApps = stoi(json["spoofApps"].get<std::string>());
-                if (verboseLogs > 0) LOGD("Per-app spoofing %s!", (spoofApps > 0) ? "enabled" : "disabled");
+
+                if (verboseLogs > 0)
+                    LOGD(
+                            "Per-app spoofing %s!",
+                            (spoofApps > 0) ? "enabled" : "disabled"
+                    );
             } else {
                 LOGD("Error parsing spoofApps!");
             }
+
             json.erase("spoofApps");
         }
 
-        if (json.contains("BRAND") && !json["BRAND"].is_null() && json["BRAND"].is_string() && json["BRAND"] != "") {
+        if (json.contains("BRAND") &&
+            !json["BRAND"].is_null() &&
+            json["BRAND"].is_string() &&
+            json["BRAND"] != "") {
+
             brandValue = json["BRAND"].get<std::string>();
         }
-        if (json.contains("DEVICE") && !json["DEVICE"].is_null() && json["DEVICE"].is_string() && json["DEVICE"] != "") {
+
+        if (json.contains("DEVICE") &&
+            !json["DEVICE"].is_null() &&
+            json["DEVICE"].is_string() &&
+            json["DEVICE"] != "") {
+
             deviceValue = json["DEVICE"].get<std::string>();
         }
-        if (json.contains("MODEL") && !json["MODEL"].is_null() && json["MODEL"].is_string() && json["MODEL"] != "") {
+
+        if (json.contains("MODEL") &&
+            !json["MODEL"].is_null() &&
+            json["MODEL"].is_string() &&
+            json["MODEL"] != "") {
+
             modelValue = json["MODEL"].get<std::string>();
         }
 
@@ -389,137 +572,346 @@ private:
         }
 
         if (json.contains("spoofBuild")) {
-            if (!json["spoofBuild"].is_null() && json["spoofBuild"].is_string() && json["spoofBuild"] != "") {
+            if (!json["spoofBuild"].is_null() &&
+                json["spoofBuild"].is_string() &&
+                json["spoofBuild"] != "") {
+
                 spoofBuild = stoi(json["spoofBuild"].get<std::string>());
-                if (verboseLogs > 0) LOGD("Spoofing Build Fields %s!", (spoofBuild > 0) ? "enabled" : "disabled");
+
+                if (verboseLogs > 0)
+                    LOGD(
+                            "Spoofing Build Fields %s!",
+                            (spoofBuild > 0) ? "enabled" : "disabled"
+                    );
             } else {
                 LOGD("Error parsing spoofBuild!");
             }
+
             json.erase("spoofBuild");
         }
+
         if (json.contains("spoofProps")) {
-            if (!json["spoofProps"].is_null() && json["spoofProps"].is_string() && json["spoofProps"] != "") {
+            if (!json["spoofProps"].is_null() &&
+                json["spoofProps"].is_string() &&
+                json["spoofProps"] != "") {
+
                 spoofProps = stoi(json["spoofProps"].get<std::string>());
-                if (verboseLogs > 0) LOGD("Spoofing System Properties %s!", (spoofProps > 0) ? "enabled" : "disabled");
+
+                if (verboseLogs > 0)
+                    LOGD(
+                            "Spoofing System Properties %s!",
+                            (spoofProps > 0) ? "enabled" : "disabled"
+                    );
             } else {
                 LOGD("Error parsing spoofProps!");
             }
+
             json.erase("spoofProps");
         }
+
         if (json.contains("spoofProvider")) {
-            if (!json["spoofProvider"].is_null() && json["spoofProvider"].is_string() && json["spoofProvider"] != "") {
+            if (!json["spoofProvider"].is_null() &&
+                json["spoofProvider"].is_string() &&
+                json["spoofProvider"] != "") {
+
                 spoofProvider = stoi(json["spoofProvider"].get<std::string>());
-                if (verboseLogs > 0) LOGD("Spoofing Keystore Provider %s!", (spoofProvider > 0) ? "enabled" : "disabled");
+
+                if (verboseLogs > 0)
+                    LOGD(
+                            "Spoofing Keystore Provider %s!",
+                            (spoofProvider > 0) ? "enabled" : "disabled"
+                    );
             } else {
                 LOGD("Error parsing spoofProvider!");
             }
+
             json.erase("spoofProvider");
         }
+
         if (json.contains("spoofSignature")) {
-            if (!json["spoofSignature"].is_null() && json["spoofSignature"].is_string() && json["spoofSignature"] != "") {
+            if (!json["spoofSignature"].is_null() &&
+                json["spoofSignature"].is_string() &&
+                json["spoofSignature"] != "") {
+
                 spoofSignature = stoi(json["spoofSignature"].get<std::string>());
-                if (verboseLogs > 0) LOGD("Spoofing ROM Signature %s!", (spoofSignature > 0) ? "enabled" : "disabled");
+
+                if (verboseLogs > 0)
+                    LOGD(
+                            "Spoofing ROM Signature %s!",
+                            (spoofSignature > 0) ? "enabled" : "disabled"
+                    );
             } else {
                 LOGD("Error parsing spoofSignature!");
             }
+
             json.erase("spoofSignature");
         }
 
         std::vector<std::string> eraseKeys;
-        for (auto &jsonList: json.items()) {
-            if (verboseLogs > 1) LOGD("Parsing %s", jsonList.key().c_str());
+
+        for (auto &jsonList : json.items()) {
+            if (verboseLogs > 1)
+                LOGD("Parsing %s", jsonList.key().c_str());
+
             if (jsonList.key().find_first_of("*.") != std::string::npos) {
-                if (!jsonList.value().is_null() && jsonList.value().is_string()) {
+                if (!jsonList.value().is_null() &&
+                    jsonList.value().is_string()) {
+
                     if (jsonList.value() == "") {
-                        LOGD("%s is empty, skipping", jsonList.key().c_str());
+                        LOGD(
+                                "%s is empty, skipping",
+                                jsonList.key().c_str()
+                        );
                     } else {
-                        if (verboseLogs > 0) LOGD("Adding '%s' to properties list", jsonList.key().c_str());
+                        if (verboseLogs > 0)
+                            LOGD(
+                                    "Adding '%s' to properties list",
+                                    jsonList.key().c_str()
+                            );
+
                         jsonProps[jsonList.key()] = jsonList.value();
                     }
                 } else {
-                    LOGD("Error parsing %s!", jsonList.key().c_str());
+                    LOGD(
+                            "Error parsing %s!",
+                            jsonList.key().c_str()
+                    );
                 }
+
                 eraseKeys.push_back(jsonList.key());
             }
         }
-        for (auto key: eraseKeys) {
-            if (json.contains(key)) json.erase(key);
+
+        for (auto key : eraseKeys) {
+            if (json.contains(key))
+                json.erase(key);
         }
     }
 
     void inject() {
-        const char* niceName = pkgName == VENDING_PACKAGE ? "PS" : "DG";
+        const char *niceName =
+                pkgName == VENDING_PACKAGE ? "PS" : "DG";
 
         LOGD("JNI %s: Getting system classloader", niceName);
-        auto clClass = env->FindClass("java/lang/ClassLoader");
-        auto getSystemClassLoader = env->GetStaticMethodID(clClass, "getSystemClassLoader", "()Ljava/lang/ClassLoader;");
-        auto systemClassLoader = env->CallStaticObjectMethod(clClass, getSystemClassLoader);
+
+        auto clClass =
+                env->FindClass("java/lang/ClassLoader");
+
+        auto getSystemClassLoader =
+                env->GetStaticMethodID(
+                        clClass,
+                        "getSystemClassLoader",
+                        "()Ljava/lang/ClassLoader;"
+                );
+
+        auto systemClassLoader =
+                env->CallStaticObjectMethod(
+                        clClass,
+                        getSystemClassLoader
+                );
 
         LOGD("JNI %s: Creating module classloader", niceName);
-        auto dexClClass = env->FindClass("dalvik/system/InMemoryDexClassLoader");
-        auto dexClInit = env->GetMethodID(dexClClass, "<init>", "(Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;)V");
-        auto buffer = env->NewDirectByteBuffer(dexVector.data(), static_cast<jlong>(dexVector.size()));
-        auto dexCl = env->NewObject(dexClClass, dexClInit, buffer, systemClassLoader);
+
+        auto dexClClass =
+                env->FindClass("dalvik/system/InMemoryDexClassLoader");
+
+        auto dexClInit =
+                env->GetMethodID(
+                        dexClClass,
+                        "<init>",
+                        "(Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;)V"
+                );
+
+        auto buffer =
+                env->NewDirectByteBuffer(
+                        dexVector.data(),
+                        static_cast<jlong>(dexVector.size())
+                );
+
+        auto dexCl =
+                env->NewObject(
+                        dexClClass,
+                        dexClInit,
+                        buffer,
+                        systemClassLoader
+                );
 
         LOGD("JNI %s: Loading module class", niceName);
-        auto loadClass = env->GetMethodID(clClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
-        const char* className = pkgName == VENDING_PACKAGE ? "es.chiteroman.playintegrityfix.EntryPointVending" : "es.chiteroman.playintegrityfix.EntryPoint";
-        auto entryClassName = env->NewStringUTF(className);
-        auto entryClassObj = env->CallObjectMethod(dexCl, loadClass, entryClassName);
 
-        // Check and bail out cleanly
+        auto loadClass =
+                env->GetMethodID(
+                        clClass,
+                        "loadClass",
+                        "(Ljava/lang/String;)Ljava/lang/Class;"
+                );
+
+        const char *className =
+                pkgName == VENDING_PACKAGE
+                ? "es.chiteroman.playintegrityfix.EntryPointVending"
+                : "es.chiteroman.playintegrityfix.EntryPoint";
+
+        auto entryClassName =
+                env->NewStringUTF(className);
+
+        auto entryClassObj =
+                env->CallObjectMethod(
+                        dexCl,
+                        loadClass,
+                        entryClassName
+                );
+
         if (env->ExceptionCheck()) {
-            LOGD("JNI %s: Exception while loading class '%s', clearing and aborting injection", niceName, className);
+            LOGD(
+                    "JNI %s: Exception while loading class '%s', clearing and aborting injection",
+                    niceName,
+                    className
+            );
+
             env->ExceptionClear();
+
             env->DeleteLocalRef(clClass);
             env->DeleteLocalRef(systemClassLoader);
             env->DeleteLocalRef(dexClClass);
             env->DeleteLocalRef(buffer);
             env->DeleteLocalRef(dexCl);
             env->DeleteLocalRef(entryClassName);
-            return;
-        }
-        if (entryClassObj == nullptr) {
-            LOGD("JNI %s: loadClass('%s') returned null, aborting injection", niceName, className);
-            env->DeleteLocalRef(clClass);
-            env->DeleteLocalRef(systemClassLoader);
-            env->DeleteLocalRef(dexClClass);
-            env->DeleteLocalRef(buffer);
-            env->DeleteLocalRef(dexCl);
-            env->DeleteLocalRef(entryClassName);
+
             return;
         }
 
-        auto entryClass = (jclass) entryClassObj;
+        if (entryClassObj == nullptr) {
+            LOGD(
+                    "JNI %s: loadClass('%s') returned null, aborting injection",
+                    niceName,
+                    className
+            );
+
+            env->DeleteLocalRef(clClass);
+            env->DeleteLocalRef(systemClassLoader);
+            env->DeleteLocalRef(dexClClass);
+            env->DeleteLocalRef(buffer);
+            env->DeleteLocalRef(dexCl);
+            env->DeleteLocalRef(entryClassName);
+
+            return;
+        }
+
+        auto entryClass =
+                (jclass) entryClassObj;
 
         JNINativeMethod methods[] = {
-            {"setFieldNative", "(Ljava/lang/Class;Ljava/lang/reflect/Field;Ljava/lang/String;Ljava/lang/Object;)V", (void*) setFieldNative}
+            {
+                "setFieldNative",
+                "(Ljava/lang/Class;Ljava/lang/reflect/Field;Ljava/lang/String;Ljava/lang/Object;)V",
+                (void *) setFieldNative
+            }
         };
-        env->RegisterNatives(entryClass, methods, 1);
+
+        env->RegisterNatives(
+                entryClass,
+                methods,
+                1
+        );
 
         if (pkgName == VENDING_PACKAGE) {
-            LOGD("JNI %s: Calling EntryPointVending.init", niceName);
-            auto entryInit = env->GetStaticMethodID(entryClass, "init", "(IIILjava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
-            auto javaStr = env->NewStringUTF(vendingFingerprintValue.c_str());
-            auto brandStr = env->NewStringUTF(brandValue.c_str());
-            auto deviceStr = env->NewStringUTF(deviceValue.c_str());
-            auto modelStr = env->NewStringUTF(modelValue.c_str());
-            env->CallStaticVoidMethod(entryClass, entryInit, verboseLogs, spoofVendingFinger, spoofVendingSdk, javaStr, spoofPixel, brandStr, deviceStr, modelStr);
+            LOGD(
+                    "JNI %s: Calling EntryPointVending.init",
+                    niceName
+            );
+
+            auto entryInit =
+                    env->GetStaticMethodID(
+                            entryClass,
+                            "init",
+                            "(IIILjava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V"
+                    );
+
+            auto javaStr =
+                    env->NewStringUTF(
+                            vendingFingerprintValue.c_str()
+                    );
+
+            auto brandStr =
+                    env->NewStringUTF(
+                            brandValue.c_str()
+                    );
+
+            auto deviceStr =
+                    env->NewStringUTF(
+                            deviceValue.c_str()
+                    );
+
+            auto modelStr =
+                    env->NewStringUTF(
+                            modelValue.c_str()
+                    );
+
+            env->CallStaticVoidMethod(
+                    entryClass,
+                    entryInit,
+                    verboseLogs,
+                    spoofVendingFinger,
+                    spoofVendingSdk,
+                    javaStr,
+                    spoofPixel,
+                    brandStr,
+                    deviceStr,
+                    modelStr
+            );
+
             env->DeleteLocalRef(javaStr);
             env->DeleteLocalRef(brandStr);
             env->DeleteLocalRef(deviceStr);
             env->DeleteLocalRef(modelStr);
-        } else {
-            LOGD("JNI %s: Sending JSON", niceName);
-            auto receiveJson = env->GetStaticMethodID(entryClass, "receiveJson", "(Ljava/lang/String;)V");
-            auto javaStr = env->NewStringUTF(json.dump().c_str());
-            env->CallStaticVoidMethod(entryClass, receiveJson, javaStr);
 
-            LOGD("JNI %s: Calling EntryPoint.init", niceName);
-            auto entryInit = env->GetStaticMethodID(entryClass, "init", "(IIII)V");
-            env->CallStaticVoidMethod(entryClass, entryInit, verboseLogs, spoofBuild, spoofProvider, spoofSignature);
+        } else {
+            LOGD(
+                    "JNI %s: Sending JSON",
+                    niceName
+            );
+
+            auto receiveJson =
+                    env->GetStaticMethodID(
+                            entryClass,
+                            "receiveJson",
+                            "(Ljava/lang/String;)V"
+                    );
+
+            auto javaStr =
+                    env->NewStringUTF(
+                            json.dump().c_str()
+                    );
+
+            env->CallStaticVoidMethod(
+                    entryClass,
+                    receiveJson,
+                    javaStr
+            );
+
+            LOGD(
+                    "JNI %s: Calling EntryPoint.init",
+                    niceName
+            );
+
+            auto entryInit =
+                    env->GetStaticMethodID(
+                            entryClass,
+                            "init",
+                            "(IIII)V"
+                    );
+
+            env->CallStaticVoidMethod(
+                    entryClass,
+                    entryInit,
+                    verboseLogs,
+                    spoofBuild,
+                    spoofProvider,
+                    spoofSignature
+            );
+
             env->DeleteLocalRef(javaStr);
         }
+
         env->DeleteLocalRef(clClass);
         env->DeleteLocalRef(systemClassLoader);
         env->DeleteLocalRef(dexClClass);
@@ -531,54 +923,140 @@ private:
 
     void injectApps() {
         LOGD("JNI APPS: Getting system classloader");
-        auto clClass = env->FindClass("java/lang/ClassLoader");
-        auto getSystemClassLoader = env->GetStaticMethodID(clClass, "getSystemClassLoader", "()Ljava/lang/ClassLoader;");
-        auto systemClassLoader = env->CallStaticObjectMethod(clClass, getSystemClassLoader);
+
+        auto clClass =
+                env->FindClass("java/lang/ClassLoader");
+
+        auto getSystemClassLoader =
+                env->GetStaticMethodID(
+                        clClass,
+                        "getSystemClassLoader",
+                        "()Ljava/lang/ClassLoader;"
+                );
+
+        auto systemClassLoader =
+                env->CallStaticObjectMethod(
+                        clClass,
+                        getSystemClassLoader
+                );
 
         LOGD("JNI APPS: Creating module classloader");
-        auto dexClClass = env->FindClass("dalvik/system/InMemoryDexClassLoader");
-        auto dexClInit = env->GetMethodID(dexClClass, "<init>", "(Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;)V");
-        auto buffer = env->NewDirectByteBuffer(dexVector.data(), static_cast<jlong>(dexVector.size()));
-        auto dexCl = env->NewObject(dexClClass, dexClInit, buffer, systemClassLoader);
+
+        auto dexClClass =
+                env->FindClass("dalvik/system/InMemoryDexClassLoader");
+
+        auto dexClInit =
+                env->GetMethodID(
+                        dexClClass,
+                        "<init>",
+                        "(Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;)V"
+                );
+
+        auto buffer =
+                env->NewDirectByteBuffer(
+                        dexVector.data(),
+                        static_cast<jlong>(dexVector.size())
+                );
+
+        auto dexCl =
+                env->NewObject(
+                        dexClClass,
+                        dexClInit,
+                        buffer,
+                        systemClassLoader
+                );
 
         LOGD("JNI APPS: Loading module class");
-        auto loadClass = env->GetMethodID(clClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
-        auto entryClassName = env->NewStringUTF("es.chiteroman.playintegrityfix.EntryPointApps");
-        auto entryClassObj = env->CallObjectMethod(dexCl, loadClass, entryClassName);
+
+        auto loadClass =
+                env->GetMethodID(
+                        clClass,
+                        "loadClass",
+                        "(Ljava/lang/String;)Ljava/lang/Class;"
+                );
+
+        auto entryClassName =
+                env->NewStringUTF(
+                        "es.chiteroman.playintegrityfix.EntryPointApps"
+                );
+
+        auto entryClassObj =
+                env->CallObjectMethod(
+                        dexCl,
+                        loadClass,
+                        entryClassName
+                );
 
         if (env->ExceptionCheck()) {
-            LOGD("JNI APPS: Exception while loading EntryPointApps, clearing and aborting injection");
+            LOGD(
+                    "JNI APPS: Exception while loading EntryPointApps, clearing and aborting injection"
+            );
+
             env->ExceptionClear();
+
             env->DeleteLocalRef(clClass);
             env->DeleteLocalRef(systemClassLoader);
             env->DeleteLocalRef(dexClClass);
             env->DeleteLocalRef(buffer);
             env->DeleteLocalRef(dexCl);
             env->DeleteLocalRef(entryClassName);
-            return;
-        }
-        if (entryClassObj == nullptr) {
-            LOGD("JNI APPS: loadClass('EntryPointApps') returned null, aborting injection");
-            env->DeleteLocalRef(clClass);
-            env->DeleteLocalRef(systemClassLoader);
-            env->DeleteLocalRef(dexClClass);
-            env->DeleteLocalRef(buffer);
-            env->DeleteLocalRef(dexCl);
-            env->DeleteLocalRef(entryClassName);
+
             return;
         }
 
-        auto entryClass = (jclass) entryClassObj;
+        if (entryClassObj == nullptr) {
+            LOGD(
+                    "JNI APPS: loadClass('EntryPointApps') returned null, aborting injection"
+            );
+
+            env->DeleteLocalRef(clClass);
+            env->DeleteLocalRef(systemClassLoader);
+            env->DeleteLocalRef(dexClClass);
+            env->DeleteLocalRef(buffer);
+            env->DeleteLocalRef(dexCl);
+            env->DeleteLocalRef(entryClassName);
+
+            return;
+        }
+
+        auto entryClass =
+                (jclass) entryClassObj;
 
         JNINativeMethod methods[] = {
-            {"setFieldNative", "(Ljava/lang/Class;Ljava/lang/reflect/Field;Ljava/lang/String;Ljava/lang/Object;)V", (void*) setFieldNative}
+            {
+                "setFieldNative",
+                "(Ljava/lang/Class;Ljava/lang/reflect/Field;Ljava/lang/String;Ljava/lang/Object;)V",
+                (void *) setFieldNative
+            }
         };
-        env->RegisterNatives(entryClass, methods, 1);
+
+        env->RegisterNatives(
+                entryClass,
+                methods,
+                1
+        );
 
         LOGD("JNI APPS: Calling EntryPointApps.init");
-        auto entryInit = env->GetStaticMethodID(entryClass, "init", "(ILjava/lang/String;)V");
-        auto javaStr = env->NewStringUTF(json.dump().c_str());
-        env->CallStaticVoidMethod(entryClass, entryInit, verboseLogs, javaStr);
+
+        auto entryInit =
+                env->GetStaticMethodID(
+                        entryClass,
+                        "init",
+                        "(ILjava/lang/String;)V"
+                );
+
+        auto javaStr =
+                env->NewStringUTF(
+                        json.dump().c_str()
+                );
+
+        env->CallStaticVoidMethod(
+                entryClass,
+                entryInit,
+                verboseLogs,
+                javaStr
+        );
+
         env->DeleteLocalRef(javaStr);
 
         env->DeleteLocalRef(clClass);
@@ -592,10 +1070,14 @@ private:
 };
 
 static void companion(int fd) {
-    long dexSize = 0, configSize = 0;
-    std::vector<char> dexVector, configVector;
+    long dexSize = 0;
+    long configSize = 0;
 
-    FILE *dex = fopen(DEX_FILE_PATH, "rb");
+    std::vector<char> dexVector;
+    std::vector<char> configVector;
+
+    FILE *dex =
+            fopen(DEX_FILE_PATH, "rb");
 
     if (dex) {
         fseek(dex, 0, SEEK_END);
@@ -603,16 +1085,26 @@ static void companion(int fd) {
         fseek(dex, 0, SEEK_SET);
 
         dexVector.resize(dexSize);
-        fread(dexVector.data(), 1, dexSize, dex);
+
+        fread(
+                dexVector.data(),
+                1,
+                dexSize,
+                dex
+        );
 
         fclose(dex);
     }
 
-    FILE *config = fopen(CUSTOM_PROP_FILE_PATH, "r");
+    FILE *config =
+            fopen(CUSTOM_PROP_FILE_PATH, "r");
+
     if (!config)
         config = fopen(CUSTOM_JSON_FILE_PATH, "r");
+
     if (!config)
         config = fopen(PROP_FILE_PATH, "r");
+
     if (!config)
         config = fopen(JSON_FILE_PATH, "r");
 
@@ -622,16 +1114,40 @@ static void companion(int fd) {
         fseek(config, 0, SEEK_SET);
 
         configVector.resize(configSize);
-        fread(configVector.data(), 1, configSize, config);
+
+        fread(
+                configVector.data(),
+                1,
+                configSize,
+                config
+        );
 
         fclose(config);
     }
 
-    write(fd, &dexSize, sizeof(long));
-    write(fd, &configSize, sizeof(long));
+    write(
+            fd,
+            &dexSize,
+            sizeof(long)
+    );
 
-    write(fd, dexVector.data(), dexSize);
-    write(fd, configVector.data(), configSize);
+    write(
+            fd,
+            &configSize,
+            sizeof(long)
+    );
+
+    write(
+            fd,
+            dexVector.data(),
+            dexSize
+    );
+
+    write(
+            fd,
+            configVector.data(),
+            configSize
+    );
 
     dexVector.clear();
     configVector.clear();
